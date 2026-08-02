@@ -1,0 +1,92 @@
+# End-to-end corpus: each row is translated by cel2lean and compiled by Lean,
+# asserting the emitted expression is a well-typed, Decidable Prop over its
+# base type. Columns (tab-separated): name, Lean type of `this`, flags, CEL.
+# Flags: `-` none, `nodec` skips the Decidable assertion.
+
+# -- strings ------------------------------------------------------------------
+string_max_len	String	-	this.size() <= 100
+starts_with	String	-	this.startsWith('foo')
+not_contains	String	-	!this.contains('forbidden')
+regex	String	-	this.matches('^[a-z0-9]+$')
+empty_or_email	String	-	this == '' || this.isEmail()
+hostname	String	-	this.isHostname()
+uri_or_ref	String	-	this.isUri() || this.isUriRef()
+ip_v4	String	-	this.isIp(4)
+ip_any	String	-	this.isIp()
+ip_prefix_strict	String	-	this.isIpPrefix(true)
+ip_prefix_full	String	-	this.isIpPrefix(4, true)
+host_and_port	String	-	this.isHostAndPort(true)
+string_lt	String	-	this < 'zzz'
+concat	String	-	this + '!' == 'hi!'
+str_escapes	String	-	this.contains("say \"hi\"\n") || this.contains('é')
+str_to_int	String	-	int(this) != 0
+map_literal_in	String	-	this in {'a': 'x', 'b': 'y'}
+
+# -- integers -----------------------------------------------------------------
+int32_range	Int32	-	this >= 1 && this <= 100
+int32_even_half	Int32	-	this % 100 == 0 && this / 2 <= 50
+int32_neg_bounds	Int32	-	-1 <= this && this <= 1
+int32_in	Int32	-	this in [1, 2, 3]
+int64_hex	Int64	-	this == 0x7B
+int64_arith	Int64	-	this * 2 + 1 <= 100
+int64_to_string	Int64	-	string(this) == '42'
+uint64_nonzero	UInt64	-	this != 0u
+uint32_range	UInt32	-	this >= 1u && this < 4294967295u
+
+# -- floats -------------------------------------------------------------------
+float_range	Float	-	this >= 0.0 && this <= 1.0
+float_not_nan	Float	-	!this.isNan()
+float_not_inf	Float	-	!this.isInf() && !this.isInf(1)
+float_sci	Float	-	this < 1.5e3 || this > 1e-5
+float32_range	Float32	-	this >= -90.0 && this <= 90.0
+
+# -- bool ---------------------------------------------------------------------
+bool_ternary	Bool	-	this == true ? true : this == false
+
+# -- bytes --------------------------------------------------------------------
+bytes_eq_text	ByteArray	-	this == b'foo'
+bytes_raw	ByteArray	-	this == b'\xff\x00'
+bytes_starts	ByteArray	-	this.startsWith(b'MZ')
+bytes_ends	ByteArray	-	this.endsWith(b'\x00')
+bytes_contains	ByteArray	-	this.contains(b'x')
+bytes_size	ByteArray	-	size(this) > 4
+
+# -- repeated (Array) ---------------------------------------------------------
+rep_all	Array Int32	-	this.all(item, item > 0)
+rep_exists	Array Int32	-	this.exists(v, v in [1, 2])
+rep_exists_one	Array Int32	-	this.exists_one(i, i == 0)
+rep_unique	Array Int32	-	this.unique()
+rep_filter_size	Array Int32	-	this.filter(i, i > 0).size() == this.size()
+rep_map_eq	Array Int32	-	this.map(v, v * 2) == [2, 4]
+rep_map_filter	Array Int32	-	this.map(v, v > 0, v * 2).size() > 0
+rep_map_exists	Array String	-	this.map(s, s.size()).exists(n, n > 10)
+rep_index	Array Int32	-	this[0] > 5
+rep_str_all	Array String	-	this.all(s, s.startsWith('a') && s.size() < 9)
+rep_shadow	Array String	-	this.all(x, x.size() < this.size())
+rep_concat	Array Int32	-	this + [1] == [2, 1]
+
+# -- maps (Std.HashMap) -------------------------------------------------------
+map_key_in	Std.HashMap String Int32	-	'k' in this
+map_size	Std.HashMap String Int32	-	this.size() <= 16
+map_index	Std.HashMap String String	-	this['env'] == 'prod'
+
+# -- presence / options -------------------------------------------------------
+opt_null	Option Int32	-	this != null
+msg_presence_or	CelTest.Shipment	-	has(this.a) || has(this.b)
+msg_implication	CelTest.Shipment	-	this.state == 'DELIVERED' ? has(this.tracking) : true
+
+# -- message-level expressions ------------------------------------------------
+msg_field_cmp	CelTest.Range	-	this.end_time > this.start_time
+msg_keyword_field	CelTest.Weird	-	this.end > this.from
+msg_cond_gt	CelTest.Flags	-	(this.a > 0 ? this.b : this.c) > 0
+msg_nested	CelTest.Order	-	this.enabled == true ? this.url != '' : true
+prec_mix	CelTest.Flags	-	this.a > 0 || this.b > 0 && this.c > 0
+not_and	CelTest.Flags	-	!(this.a > 0 && this.b > 0)
+iff_bools	CelTest.Order	-	!this.enabled == (this.url == '')
+
+# -- timestamps / durations -----------------------------------------------------
+ts_lt_now	Cel.Timestamp	-	this < now
+ts_cmp	Cel.Timestamp	-	this < timestamp('2030-01-01T00:00:00Z')
+dur_cmp	Cel.Duration	-	this <= duration('1h')
+ts_within	Cel.Timestamp	-	now - this <= duration('24h') && this <= now
+ts_window	Cel.Timestamp	-	this >= timestamp('2020-01-01T00:00:00Z') && this < timestamp('2030-01-01T00:00:00Z')

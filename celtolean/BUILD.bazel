@@ -1,0 +1,26 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "celtolean",
+    srcs = [
+        "exports.go",
+        "functions.go",
+        "lean.go",
+        "translate.go",
+    ],
+    importpath = "github.com/petersonbill64/protovalidate-lean/celtolean",
+    visibility = ["//visibility:public"],
+    deps = [
+        "@com_github_google_cel_go//common:go_default_library",
+        "@com_github_google_cel_go//common/ast:go_default_library",
+        "@com_github_google_cel_go//common/operators:go_default_library",
+        "@com_github_google_cel_go//common/types:go_default_library",
+        "@com_github_google_cel_go//parser:go_default_library",
+    ],
+)
+
+go_test(
+    name = "celtolean_test",
+    srcs = ["translate_test.go"],
+    embed = [":celtolean"],
+)

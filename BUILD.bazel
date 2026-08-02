@@ -1,0 +1,15 @@
+# protovalidate-lean/BUILD.bazel
+"""Root package for the protovalidate_lean module.
+
+The public Starlark API lives in //protovalidate:defs.bzl; this file hosts the
+Lean runtime library backing generated refinement propositions and the gazelle
+target maintaining Go BUILD files.
+"""
+
+load("@gazelle//:def.bzl", "gazelle")
+
+package(default_visibility = ["//visibility:public"])
+
+# gazelle:prefix github.com/petersonbill64/protovalidate-lean
+# gazelle:proto disable_global
+gazelle(name = "gazelle")

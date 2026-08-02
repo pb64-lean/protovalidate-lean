@@ -1,0 +1,83 @@
+syntax = "proto3";
+package shipping.v1;
+import "buf/validate/validate.proto";
+import "examples/shipping/inventory.proto";
+import "examples/common/money.proto";
+import "google/protobuf/timestamp.proto";
+
+message Item {
+  string sku = 1 [(buf.validate.field).cel = {
+    id: "sku.format", message: "sku must be 3-32 lowercase chars",
+    expression: "this.size() >= 3 && this.size() <= 32"
+  }];
+  int32 quantity = 2 [(buf.validate.field).cel = {
+    id: "quantity.positive", expression: "this > 0"
+  }];
+}
+
+message Order {
+  option (buf.validate.message).cel = {
+    id: "order.tracking", message: "shipped orders need a tracking number",
+    expression: "this.status == 'SHIPPED' ? has(this.tracking) : true"
+  };
+  option (buf.validate.message).cel = {
+    id: "order.payer_len",
+    expression: "this.customer_id.size() <= 20"
+  };
+  option (buf.validate.message).cel = {
+    id: "order.featured_not_banned",
+    expression: "this.featured.sku != 'banned'"
+  };
+  option (buf.validate.message).cel = {
+    id: "order.featured_weight",
+    expression: "this.featured.dims.weight_grams <= 50000"
+  };
+  option (buf.validate.message).cel = {
+    id: "order.payment_note",
+    expression: "this.payment.cash_note != 'iou-void'"
+  };
+  option (buf.validate.message).cel = {
+    id: "order.payment_credit_sku",
+    expression: "this.payment.store_credit_product.sku != 'banned'"
+  };
+  option (buf.validate.message).cel = {
+    id: "order.payment_note_len",
+    expression: "has(this.payment.cash_note) ? this.payment.cash_note.size() >= 3 : true"
+  };
+  option (buf.validate.message).cel = {
+    id: "order.featured_contact_domain",
+    expression: "has(this.featured.contact) ? this.featured.contact.endsWith('.com') : true"
+  };
+  option (buf.validate.message).cel = {
+    id: "order.total_cap",
+    expression: "this.total.amount_cents <= 1000000"
+  };
+  option (buf.validate.message).cel = {
+    id: "order.tracking_len",
+    expression: "this.tracking == '' || this.tracking.size() >= 5"
+  };
+  string id = 1 [(buf.validate.field).cel = {
+    id: "id.len", expression: "this.size() == 8"
+  }, (buf.validate.field).cel = {
+    id: "id.prefix", expression: "this.startsWith('ord-') || this.startsWith('ORD-')"
+  }];
+  string status = 2;
+  optional string tracking = 3;
+  repeated Item items = 4 [(buf.validate.field).cel = {
+    id: "items.nonempty", expression: "this.size() > 0"
+  }];
+  optional int64 discount_cents = 5 [(buf.validate.field).cel = {
+    id: "discount.range", expression: "this >= 0 && this % 100 == 0"
+  }];
+  map<string, string> labels = 6;
+  catalog.v1.Product featured = 11;
+  common.v1.Money total = 12;
+  google.protobuf.Timestamp created_at = 13 [(buf.validate.field).timestamp.gte = {
+    seconds: 946684800  // 2000-01-01T00:00:00Z
+  }];
+  catalog.v1.Payment payment = 14;
+  oneof payer {
+    string customer_id = 7 [(buf.validate.field).string.min_len = 3];
+    string account_id = 8;
+  }
+}

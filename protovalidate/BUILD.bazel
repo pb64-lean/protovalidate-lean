@@ -1,0 +1,7 @@
+# protovalidate/BUILD.bazel
+"""Package for the protovalidate_lean public Starlark API.
+
+Marks this package so @protovalidate_lean//protovalidate:defs.bzl is loadable.
+"""
+
+package(default_visibility = ["//visibility:public"])

@@ -1,0 +1,35 @@
+# lean/BUILD.bazel
+"""Lean runtime libraries for protovalidate_lean.
+
+Sources live under lean/ (with the prefix stripped from module names, so
+lean/Protovalidate/Cel.lean is `import Protovalidate.Cel`) because the
+Starlark package protovalidate/ would collide with a top-level Protovalidate/
+directory on case-insensitive filesystems.
+"""
+
+load("@rules_lean//lean:defs.bzl", "lean_library")
+
+package(default_visibility = ["//visibility:public"])
+
+# Runtime shims referenced by cel2lean-emitted propositions (Cel.* helpers,
+# dot-notation extensions on core types). Generated protovalidate code and
+# its consumers depend on this.
+lean_library(
+    name = "protovalidate_cel",
+    srcs = [
+        "Protovalidate/Cel.lean",
+        "Protovalidate/Cel/Format.lean",
+        "Protovalidate/Cel/Regex.lean",
+        "Protovalidate/Cel/Time.lean",
+    ],
+    strip_module_prefix = "lean",
+    # Cel.Timestamp/Duration are the generated well-known types.
+    deps = ["@grpc_lean_protobuf//Protobuf:well_known"],
+)
+
+# Runtime support for generated validate functions (Violation).
+lean_library(
+    name = "protovalidate_runtime",
+    srcs = ["Protovalidate/Runtime.lean"],
+    strip_module_prefix = "lean",
+)

@@ -1,0 +1,45 @@
+# Test/BUILD.bazel
+"""End-to-end check of the CEL → Lean translation.
+
+cel2lean batch-translates the corpus into a Lean source file; compiling that
+file (against the runtime shims and stand-in message types) proves every
+emitted expression elaborates as a well-typed, Decidable Prop under the same
+toolchain that builds real generated code.
+"""
+
+load("@bazel_skylib//rules:build_test.bzl", "build_test")
+load("@rules_lean//lean:defs.bzl", "lean_library", "lean_test")
+
+lean_library(
+    name = "cel_test_types",
+    srcs = ["CelTypes.lean"],
+)
+
+genrule(
+    name = "cel_corpus_lean",
+    srcs = ["cel_corpus.tsv"],
+    outs = ["CelCorpus.lean"],
+    cmd = "$(location //cmd/cel2lean) -batch $(location cel_corpus.tsv) " +
+          "-namespace CelCorpus -import Test.CelTypes > $@",
+    tools = ["//cmd/cel2lean"],
+)
+
+lean_library(
+    name = "cel_corpus",
+    srcs = [":cel_corpus_lean"],
+    deps = [
+        ":cel_test_types",
+        "//lean:protovalidate_cel",
+    ],
+)
+
+build_test(
+    name = "cel_corpus_test",
+    targets = [":cel_corpus"],
+)
+
+lean_test(
+    name = "runtime_test",
+    srcs = ["RuntimeTest.lean"],
+    deps = ["//lean:protovalidate_cel"],
+)

@@ -1,0 +1,26 @@
+# examples/common/BUILD.bazel
+"""Cross-target dependency for the shipping example: a validated Money type
+consumed by //examples/shipping via proto_deps/valid_deps."""
+
+load("@protobuf//bazel:proto_library.bzl", "proto_library")
+load("@rules_lean_grpc//:defs.bzl", "lean_proto_library")
+load("//protovalidate:defs.bzl", "lean_protovalidate_library")
+
+package(default_visibility = ["//visibility:public"])
+
+proto_library(
+    name = "money_proto",
+    srcs = ["money.proto"],
+    deps = ["@protovalidate//proto/protovalidate/buf/validate:validate_proto"],
+)
+
+lean_proto_library(
+    name = "money_lean",
+    proto = ":money_proto",
+)
+
+lean_protovalidate_library(
+    name = "money_valid",
+    lean_proto = ":money_lean",
+    proto = ":money_proto",
+)
