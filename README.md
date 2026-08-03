@@ -1,5 +1,7 @@
 # protovalidate-lean
 
+[![CI](https://github.com/pb64-lean/protovalidate-lean/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/pb64-lean/protovalidate-lean/actions/workflows/ci.yml) [![Assurance](https://github.com/pb64-lean/protovalidate-lean/actions/workflows/assurance.yml/badge.svg?branch=main)](https://github.com/pb64-lean/protovalidate-lean/actions/workflows/assurance.yml)
+
 Partial [protovalidate](https://github.com/bufbuild/protovalidate) support for
 pure Lean 4, focused on CEL annotation support, consuming and extending
 [rules_lean](../rules_lean) and [grpc-lean](../grpc-lean).

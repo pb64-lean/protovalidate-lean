@@ -1,0 +1,24 @@
+name: ci
+
+# Hermetic Bazel tests + gazelle BUILD-drift check on the self-hosted NixOS
+# runners. Weekly schedule matters here: the Go module fetches (proxy.golang.org
+# and the buf.build Go proxy) are not pinned by the Bazel lockfile.
+# NEVER add pull_request here: these jobs run on self-hosted runners.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+  schedule:
+    - cron: "37 4 * * 1"
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    uses: pb64-lean/.github/.github/workflows/bazel-ci.yml@main
+    with:
+      siblings: rules_lean grpc-lean tls13-lean
+      post_bazel: "run //:gazelle -- -mode=diff"
