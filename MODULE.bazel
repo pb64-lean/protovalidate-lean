@@ -44,6 +44,12 @@ local_path_override(
     path = "../grpc-lean/third_party/Lean-zh/binary",
 )
 
+bazel_dep(name = "tls13-lean", version = "0.1.0", repo_name = "tls13_lean")
+local_path_override(
+    module_name = "tls13-lean",
+    path = "../tls13-lean",
+)
+
 # Proto codegen dependencies.
 bazel_dep(name = "rules_proto", version = "7.1.0")
 bazel_dep(name = "protobuf", version = "33.4")

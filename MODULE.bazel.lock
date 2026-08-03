@@ -676,7 +676,7 @@
     },
     "@@rules_lean+//lean:extensions.bzl%lean": {
       "general": {
-        "bzlTransitiveDigest": "3fjv8xfuxpPe5AgSlCqqUpAAC6gPu6tYYJ4Gi3rBdXw=",
+        "bzlTransitiveDigest": "f7up7BGRP+PsrTRmEW73ieN8UVBZgAIHx/PvsuqNqns=",
         "usagesDigest": "fqw37ZM6FXjnfWOKCMbUegS9vI7eWLlS/oCp2gB5VKg=",
         "recordedFileInputs": {},
         "recordedDirentsInputs": {},
