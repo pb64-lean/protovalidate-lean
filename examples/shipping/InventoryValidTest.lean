@@ -93,6 +93,14 @@ def main : IO Unit := do
     "product.first_tier" "indexed enum element below bound"
   expectId (Valid.Product.validate { goodProduct with tier_history := #[] }) "" "empty array: index guard unforced"
 
+  -- A `float` field is compared at CEL's double precision. The Float32
+  -- nearest 1.1 is 1.10000002384…, which is *greater* than the double 1.1, so
+  -- CEL rejects it — and so must the refinement. Comparing in Float32 (where
+  -- the literal would round to that same value) would have accepted it.
+  expectId (Valid.Product.validate { goodProduct with weight_kg := 1.0 }) "" "float under cap"
+  expectId (Valid.Product.validate { goodProduct with weight_kg := 1.1 }) "weight.cap" "float double-precision cap"
+  expectId (Valid.Product.validate { goodProduct with weight_kg := -1.0 }) "float.gte" "float gte"
+
   -- encode → decodeValid roundtrip
   let base := v.toBase
   match base.encode with

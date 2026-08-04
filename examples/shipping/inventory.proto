@@ -64,6 +64,15 @@ message Product {
     id: "lots.capacity", message: "each lot must stay under the reserved cap",
     expression: "this.all(n, n * 10000 <= 5000000000)"
   }];
+  float weight_kg = 18 [(buf.validate.field).float.gte = 0.0,
+                        (buf.validate.field).cel = {
+    // A `float` field compared against a *double* literal: CEL converts the
+    // field to double, so the emitted proposition does too. Elaborating 1.1
+    // at Float32 instead would round it up to 1.10000002384…, and a stored
+    // 1.1f would then pass a rule CEL rejects.
+    id: "weight.cap", message: "weight must not exceed the cap",
+    expression: "this <= 1.1"
+  }];
   repeated Tier tier_history = 17 [(buf.validate.field).cel = {
     // Enum elements compare as ints, through the generated .toInt32 view.
     id: "tiers.known", message: "every recorded tier must be a known tier",

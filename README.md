@@ -282,10 +282,11 @@ proposition whose CEL evaluation would have errored:
   under `Cel.mulOk x.toInt64 100` — so the guard is exactly CEL's condition
   and an intermediate outside the 32-bit range is not an overflow, matching
   CEL. Division and modulo widen too (fixing `int32Min / -1`, which wraps in
-  `Int32` but not in CEL). Without that typing (values bound by a
-  comprehension variable, elements reached through indexing) the guard falls
-  back to the operand's own Lean type, so `Int32`/`UInt32` operands demand the
-  32-bit range — conservatively stricter than CEL, sound but not exact.
+  `Int32` but not in CEL). Comprehension binders and indexed elements are typed
+  too (see below), so this reaches inside `all`/`exists` bodies; only values
+  with no proto type at all (free identifiers) fall back to the operand's own
+  Lean type, where `Int32`/`UInt32` operands demand the 32-bit range —
+  conservatively stricter than CEL, sound but not exact.
   `Nat` size arithmetic guards truncating subtraction. Constant arithmetic
   folds and range-checks at generation time (an always-erroring rule is
   rejected); concatenation and timestamp/duration arithmetic are total and
@@ -298,15 +299,18 @@ proposition whose CEL evaluation would have errored:
   scalar field rule, `this`-rooted select paths in message rules (including
   map-selection leaves and enum ints, which CEL compares as `int32`), and
   custom CEL on `repeated.items`/`map.keys`/`map.values` elements; it also
-  rejects negative literals against unsigned fields and `double` literals
-  outside `Float32`'s finite range on a `float` field. Literals meeting a
+  rejects negative literals against unsigned fields. Literals meeting a
   *widened* arithmetic result are checked at 64-bit width instead, so
   `this * 10000 <= 5000000000` on an `int32` field is accepted — the product
   is `Int64`. The same typing makes mixed-width comparisons elaborate
   (`this.small < this.big` across `int32`/`int64` widens the narrower side).
-  Values with no resolvable proto type — comprehension binders
-  (`this.all(v, v > 3000000000)`), indexed elements, free identifiers — are
-  *not* checked and can still wrap.
+- **Container elements are typed**: a path may descend into a container, so
+  the value a comprehension binds (`this.all(v, …)` — a repeated field's
+  elements, a map's keys) and the value indexing yields (`this.items[0]` — an
+  element, a map's value) carry the same descriptor typing a named field does.
+  Paths compose through binders, so `this.all(o, o.lots.all(n, n > 3e9))` is
+  range-checked at the innermost element's type. This closes the last
+  silent-wrap corner: only free identifiers now go untyped.
 - **Indexing**: CEL errors on an out-of-range index or missing map key, so
   `l[i]` / `m['k']` translate to `(l[i]?).get h` under a pending
   `(l[i]?).isSome` guard rather than a panicking `l[i]!`. Guards discharge at
@@ -320,9 +324,9 @@ proposition whose CEL evaluation would have errored:
 - **Enums work as ints**: the plugin resolves every `this` path against the
   descriptors, so enum-typed values (field rules, message-rule leaves,
   repeated/map element rules) render through the generated enum's `.toInt32`
-  view, matching CEL's enum-as-int semantics. Standard enum rules keep their
-  constructor-test form. (Enum values reached through *indexing* — an
-  enum-valued `m['k']` compared to an int — still fail at Lean elaboration.)
+  view, matching CEL's enum-as-int semantics — including enum values a
+  comprehension binds or indexing reaches (`this.tier_history[0] >= 1`), under
+  the index guard. Standard enum rules keep their constructor-test form.
 - **Map selection sugar works**: `this.labels.priority` becomes guarded key
   indexing (missing key ⇒ false, CEL's error), and `has(this.labels.priority)`
   becomes key presence — at any path depth.
@@ -330,10 +334,20 @@ proposition whose CEL evaluation would have errored:
   semantics beyond `Option` fields, evaluation-time-dependent `now`,
   placeholder timestamp/duration types, free identifiers kept verbatim,
   non-literal regex patterns.
-- `string(e)` uses `toString`, whose formatting may diverge from CEL's for
-  floats. `float` fields compare at `Float32` precision where CEL compares at
-  double precision, so a `double` literal that is not exactly representable in
-  `Float32` rounds (its *magnitude* is range-checked, its precision is not).
+- **`float` fields are compared at double precision**, as CEL does. A proto
+  `float` is Lean `Float32`, but CEL converts it to a double before any numeric
+  operation, so a typed `float` value is emitted as `x.toFloat` wherever it
+  meets a literal, another numeric field, or arithmetic (`this <= 1.1` on a
+  `float` field becomes `x.toFloat ≤ 1.1`). Widening Float32 → Float is exact,
+  so this only removes a rounding: without it the literal would elaborate at
+  `Float32` and `this == 1.1` would be *satisfiable* in Lean (by the `Float32`
+  nearest 1.1) while being unsatisfiable in CEL — the kernel proving a
+  proposition whose CEL evaluation is false. Standard `float.*` rules are left
+  narrow deliberately: their bounds come from the descriptor and are already
+  exactly `Float32` values, so the comparison cannot round either way. A
+  `float`/`double` field comparison now elaborates too (the `float` side
+  widens). What remains: `string(e)` uses `toString`, whose formatting may
+  diverge from CEL's for floats.
 
 ## Codegen semantics and limitations
 
@@ -542,17 +556,15 @@ non-generated, option-only proto dependencies such as
    now-dependent rules (`timestamp.lt_now`/`within`), which need a
    validation-time story for `Cel.now`.
 3. Residual conservative spots (sound, but stricter than CEL or late-failing).
-   Descriptor-aware numerics closed the literal-wrapping hole and made
-   arithmetic guards CEL-exact wherever a rule's `this`-rooted path resolves
-   to a proto field; what is left is where no such path exists:
-   - values bound by a comprehension variable (`this.all(v, v * 2 > 0)`) or
-     reached through indexing (`this.items[0].qty`) carry no descriptor type,
-     so their literals are unchecked and their 32-bit guards stay
-     conservative — and enum values reached through indexing still lack the
-     `.toInt32` view;
+   Descriptor-aware numerics — now reaching comprehension binders and indexed
+   elements — closed the literal-wrapping hole and made arithmetic guards
+   CEL-exact wherever a rule's value resolves to a proto type. What is left:
+   - free identifiers carry no descriptor type, so their literals are
+     unchecked and their 32-bit guards stay conservative;
    - error absorption under negation (`!(err && false)`) translates to
      failure;
-   - `float` fields compare at `Float32` precision, CEL at double precision.
+   - index proofs inside `exists_one`/`map`/`filter` bodies and negated
+     quantifier bodies have no sound discharge point and are rejected.
 4. No formal relation between `Protovalidate.Cel.Regex` and RE2 beyond the
    per-pattern differential batteries (see
    [regex assurance](#regex-assurance-what-the-guards-do-and-do-not-say)), nor

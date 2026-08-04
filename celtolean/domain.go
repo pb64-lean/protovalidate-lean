@@ -143,17 +143,21 @@ func (d *numDom) outOfRange(lit string) error {
 		"type, where it would wrap", lit, d.proto, d.lean, d.minInt(), d.maxInt())
 }
 
-// widen lifts a 32-bit proto integer to the width CEL actually computes at, so
+// widen lifts a 32-bit proto scalar to the width CEL actually computes at, so
 // arithmetic on it (and its overflow guard) is CEL-exact instead of
-// conservatively 32-bit. Values already at CEL width, floats and untyped
-// fragments pass through.
+// conservatively 32-bit, and so a `float` field is compared at the double
+// precision CEL uses. Values already at CEL width and untyped fragments pass
+// through.
 func (t *translator) widen(p piece) piece {
 	d := p.dom
-	if d == nil || d.float || d.bits != 32 {
+	if d == nil || d.bits != 32 {
 		return p
 	}
 	conv, to := ".toInt64", domI64
-	if d.unsigned {
+	switch {
+	case d.float:
+		conv, to = ".toFloat", domF64
+	case d.unsigned:
 		conv, to = ".toUInt64", domU64
 	}
 	return piece{
@@ -166,18 +170,31 @@ func (t *translator) widen(p piece) piece {
 	}
 }
 
-// unifyWidth makes two comparable proto integers elaborate at a common Lean
-// type by widening the narrower one (CEL compares int32 and int64 fields
-// directly; Lean's fixed-width types would not unify). Mixed signedness is a
-// Lean type error either way and is left alone.
+// widenFloat lifts a `float` value to `Float` before it meets anything
+// numeric. Unlike the integer widening, which unifyWidth applies only when two
+// typed operands must meet, this is unconditional: CEL evaluates every numeric
+// operation on a `float` field at double precision, and a double literal is
+// generally *not* representable in Float32. `this == 1.1` on a `float` field
+// is satisfiable in Float32 (by the Float32 nearest 1.1) and unsatisfiable in
+// CEL — so without widening the kernel could prove a proposition whose CEL
+// evaluation is false. Float32 → Float is exact, so widening only removes the
+// rounding, never introduces one.
+func (t *translator) widenFloat(p piece) piece {
+	if p.dom != domF32 {
+		return p
+	}
+	return t.widen(p)
+}
+
+// unifyWidth makes two comparable proto scalars elaborate at a common Lean
+// type by widening the narrower one (CEL compares int32 and int64, or float
+// and double, fields directly; Lean's fixed-width types would not unify).
+// Mixed signedness is a Lean type error either way and is left alone.
 func (t *translator) unifyWidth(l, r piece) (piece, piece) {
 	if l.dom == nil || r.dom == nil || l.dom == r.dom {
 		return l, r
 	}
 	if l.dom.float != r.dom.float || l.dom.unsigned != r.dom.unsigned {
-		return l, r
-	}
-	if l.dom.float {
 		return l, r
 	}
 	if l.dom.bits < r.dom.bits {
@@ -207,6 +224,11 @@ func arithDom(l, r piece) *numDom {
 // checkLiterals rejects numeric literals that fall outside the domain of the
 // typed operand they meet. Both directions are checked (`this < 3e9` and
 // `3e9 < this`), as are list/map literals on the right of `in`.
+//
+// The Float32 branch of accepts is a backstop: every site that lets a literal
+// meet a `float` value widens it to `Float` first (widenFloat), so the value's
+// domain is `double` by the time the check runs. It fires only if some path
+// forgot to widen — better a generation error than a silently rounded literal.
 func (t *translator) checkLiterals(l, r piece) error {
 	for _, pair := range [2][2]piece{{l, r}, {r, l}} {
 		v, lit := pair[0], pair[1]

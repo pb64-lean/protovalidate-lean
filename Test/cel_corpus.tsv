@@ -115,6 +115,8 @@ dom_uint32_wide	UInt32	dom=uint32	this * 2u < 8589934592u
 dom_uint64_add	UInt64	dom=uint64	this + 1u > 0u
 dom_int64_arith	Int64	dom=int64	this * 2 + 1 <= 100
 dom_float_range	Float32	dom=float	this >= -3.4e38 && this <= 3.4e38
+dom_float_precision	Float32	dom=float	this <= 1.1 && this > -1.1
+dom_float_beyond_f32	Float32	dom=float	this < 1e40
 dom_double_range	Float	dom=double	this * 2.0 <= 1e300
 dom_enum_int	CelTest.Tier	dom=enum	this >= 1 && this != 3
 dom_enum_arith	CelTest.Tier	dom=enum	this + 1 == 2

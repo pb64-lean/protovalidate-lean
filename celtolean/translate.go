@@ -816,8 +816,10 @@ func (t *translator) binaryArgs(op binOp, args []ast.Expr) (piece, error) {
 		return piece{}, err
 	}
 	// Descriptor-aware checks: a literal outside the typed operand's domain
-	// would silently wrap at elaboration, and two proto integers of different
-	// widths only unify once the narrower one is lifted to CEL's width.
+	// would silently wrap at elaboration, two proto integers of different
+	// widths only unify once the narrower one is lifted to CEL's width, and a
+	// `float` field is compared at the double precision CEL uses.
+	l, r = t.widenFloat(l), t.widenFloat(r)
 	if err := t.checkLiterals(l, r); err != nil {
 		return piece{}, err
 	}
@@ -975,6 +977,7 @@ func (t *translator) equality(fn string, args []ast.Expr) (piece, error) {
 	if rerr != nil {
 		return piece{}, rerr
 	}
+	l, r = t.widenFloat(l), t.widenFloat(r)
 	if err := t.checkLiterals(l, r); err != nil {
 		return piece{}, err
 	}

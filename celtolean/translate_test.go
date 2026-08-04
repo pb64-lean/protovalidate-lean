@@ -378,11 +378,19 @@ func TestNumericDomainWidening(t *testing.T) {
 		// No arithmetic: no widening, so the emitted proposition stays the one
 		// a Lean author would write over the field's own type.
 		{"int32_plain_compare", map[string]PathAttr{"": PathInt32}, `this > 3`, `x > 3`},
-		// Floats stay at the field's own type: CEL double arithmetic cannot
-		// error, so there is no guard to tighten (the ArithOk instance is
-		// trivially true) and widening would only obscure the proposition.
-		{"float_no_widen", map[string]PathAttr{"": PathFloat}, `this * 2.0 < 5.0`,
-			`(if h : Cel.mulOk x 2.0 then x * 2.0 < 5.0 else False)`},
+		// `float` fields widen to Float: CEL evaluates every numeric operation
+		// on them at double precision, and a double literal generally has no
+		// exact Float32 counterpart.
+		{"float_widen_arith", map[string]PathAttr{"": PathFloat}, `this * 2.0 < 5.0`,
+			`(if h : Cel.mulOk x.toFloat 2.0 then x.toFloat * 2.0 < 5.0 else False)`},
+		{"float_widen_compare", map[string]PathAttr{"": PathFloat}, `this <= 1.1`,
+			`x.toFloat ≤ 1.1`},
+		// The literal is beyond Float32's finite range but an ordinary double:
+		// widened, the comparison is exactly CEL's.
+		{"float_widen_magnitude", map[string]PathAttr{"": PathFloat}, `this < 1e40`,
+			`x.toFloat < 1e40`},
+		// double fields are already at CEL's width.
+		{"double_plain", map[string]PathAttr{"": PathDouble}, `this <= 1.1`, `x ≤ 1.1`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -396,13 +404,21 @@ func TestNumericDomainWidening(t *testing.T) {
 		})
 	}
 
-	// Comparing proto integers of different widths: CEL compares them
+	// Comparing proto scalars of different widths: CEL compares them
 	// directly, so the narrower one is lifted to the wider Lean type.
-	fields := map[string]ThisField{"small": {Text: "small"}, "big": {Text: "big"}, "n": {Text: "n"}}
-	attrs := map[string]PathAttr{"small": PathInt32, "big": PathInt64, "n": PathUInt32}
+	fields := map[string]ThisField{
+		"small": {Text: "small"}, "big": {Text: "big"}, "n": {Text: "n"},
+		"f": {Text: "f"}, "d": {Text: "d"},
+	}
+	attrs := map[string]PathAttr{
+		"small": PathInt32, "big": PathInt64, "n": PathUInt32,
+		"f": PathFloat, "d": PathDouble,
+	}
 	mixed := []struct{ cel, want string }{
 		{`this.small < this.big`, `small.toInt64 < big`},
 		{`this.big == this.small`, `big = small.toInt64`},
+		{`this.f < this.d`, `f.toFloat < d`},
+		{`this.d == this.f`, `d = f.toFloat`},
 		{`this.small + 1 > this.big`,
 			`(if h : Cel.addOk small.toInt64 1 then small.toInt64 + 1 > big else False)`},
 		{`this.n * 2u > 100u`,
@@ -447,8 +463,6 @@ func TestNumericDomainRejects(t *testing.T) {
 			"outside the domain of the int64 value"},
 		{"in_list", map[string]PathAttr{"": PathInt32}, nil, `this in [1, 2, 5000000000]`,
 			"outside the domain of the int32 value"},
-		{"float_overflow", map[string]PathAttr{"": PathFloat}, nil, `this < 1e40`,
-			"outside the finite range of the `float` field's Lean type Float32"},
 		{"message_rule_leaf", map[string]PathAttr{"stock": PathInt32}, fields,
 			`this.stock < 3000000000`, "outside the domain of the int32 value"},
 		{"message_rule_uint", map[string]PathAttr{"batch": PathUInt32}, fields,
