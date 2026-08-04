@@ -307,6 +307,140 @@ func TestPathAttrs(t *testing.T) {
 	}
 }
 
+// Numeric domains (descriptor-supplied) do two things the type-free
+// translation cannot: they reject literals that Lean would silently wrap into
+// the field's fixed-width type, and they lift 32-bit proto integers to the
+// width CEL actually computes at, making the overflow guards CEL-exact.
+func TestNumericDomainWidening(t *testing.T) {
+	tests := []struct {
+		name  string
+		attrs map[string]PathAttr
+		cel   string
+		want  string
+	}{
+		// int32 arithmetic is CEL-exact after widening: the guard is the
+		// 64-bit condition CEL itself applies, not the conservative 32-bit one.
+		{"int32_mul", map[string]PathAttr{"": PathInt32}, `this * 100 <= 1000000`,
+			`(if h : Cel.mulOk x.toInt64 100 then x.toInt64 * 100 ≤ 1000000 else False)`},
+		// ... which also admits intermediates outside the 32-bit range, exactly
+		// as CEL does.
+		{"int32_wide_intermediate", map[string]PathAttr{"": PathInt32}, `this + 3000000000 > 0`,
+			`(if h : Cel.addOk x.toInt64 3000000000 then x.toInt64 + 3000000000 > 0 else False)`},
+		{"int32_div", map[string]PathAttr{"": PathInt32}, `this / 2 == 1`, `x.toInt64 / 2 = 1`},
+		{"int32_neg", map[string]PathAttr{"": PathInt32}, `-this < 0`,
+			`(if h : Cel.negOk x.toInt64 then -x.toInt64 < 0 else False)`},
+		{"uint32_sub", map[string]PathAttr{"": PathUInt32}, `this - 1u >= 0u`,
+			`(if h : Cel.subOk x.toUInt64 1 then x.toUInt64 - 1 ≥ 0 else False)`},
+		{"enum_arith", map[string]PathAttr{"": PathEnumInt}, `this + 1 == 2`,
+			`(if h : Cel.addOk x.toInt32.toInt64 1 then x.toInt32.toInt64 + 1 = 2 else False)`},
+		// 64-bit fields are already at CEL width: unchanged.
+		{"int64_mul", map[string]PathAttr{"": PathInt64}, `this * 100 <= 1000000`,
+			`(if h : Cel.mulOk x 100 then x * 100 ≤ 1000000 else False)`},
+		// No arithmetic: no widening, so the emitted proposition stays the one
+		// a Lean author would write over the field's own type.
+		{"int32_plain_compare", map[string]PathAttr{"": PathInt32}, `this > 3`, `x > 3`},
+		// Floats stay at the field's own type: CEL double arithmetic cannot
+		// error, so there is no guard to tighten (the ArithOk instance is
+		// trivially true) and widening would only obscure the proposition.
+		{"float_no_widen", map[string]PathAttr{"": PathFloat}, `this * 2.0 < 5.0`,
+			`(if h : Cel.mulOk x 2.0 then x * 2.0 < 5.0 else False)`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := Translate(tt.cel, Options{PathAttrs: tt.attrs})
+			if err != nil {
+				t.Fatalf("Translate(%q): %v", tt.cel, err)
+			}
+			if got.Lean != tt.want {
+				t.Errorf("Translate(%q)\n  got:  %s\n  want: %s", tt.cel, got.Lean, tt.want)
+			}
+		})
+	}
+
+	// Comparing proto integers of different widths: CEL compares them
+	// directly, so the narrower one is lifted to the wider Lean type.
+	fields := map[string]ThisField{"small": {Text: "small"}, "big": {Text: "big"}, "n": {Text: "n"}}
+	attrs := map[string]PathAttr{"small": PathInt32, "big": PathInt64, "n": PathUInt32}
+	mixed := []struct{ cel, want string }{
+		{`this.small < this.big`, `small.toInt64 < big`},
+		{`this.big == this.small`, `big = small.toInt64`},
+		{`this.small + 1 > this.big`,
+			`(if h : Cel.addOk small.toInt64 1 then small.toInt64 + 1 > big else False)`},
+		{`this.n * 2u > 100u`,
+			`(if h : Cel.mulOk n.toUInt64 2 then n.toUInt64 * 2 > 100 else False)`},
+	}
+	for _, tt := range mixed {
+		got, err := Translate(tt.cel, Options{ThisFields: fields, PathAttrs: attrs})
+		if err != nil {
+			t.Fatalf("Translate(%q): %v", tt.cel, err)
+		}
+		if got.Lean != tt.want {
+			t.Errorf("Translate(%q)\n  got:  %s\n  want: %s", tt.cel, got.Lean, tt.want)
+		}
+	}
+}
+
+// Literals outside the annotated field's domain would elaborate by wrapping
+// (Lean has no range check on `(3000000000 : Int32)`), so they are rejected at
+// generation time.
+func TestNumericDomainRejects(t *testing.T) {
+	fields := map[string]ThisField{"stock": {Text: "stock"}, "batch": {Text: "batch"}}
+	tests := []struct {
+		name  string
+		attrs map[string]PathAttr
+		this  map[string]ThisField
+		cel   string
+		frag  string
+	}{
+		{"int32_gt", map[string]PathAttr{"": PathInt32}, nil, `this < 3000000000`,
+			"literal 3000000000 is outside the domain of the int32 value"},
+		{"int32_lt", map[string]PathAttr{"": PathInt32}, nil, `-3000000000 <= this`,
+			"literal -3000000000 is outside the domain of the int32 value"},
+		{"int32_eq", map[string]PathAttr{"": PathInt32}, nil, `this == 2147483648`,
+			"outside the domain of the int32 value"},
+		{"uint32_negative", map[string]PathAttr{"": PathUInt32}, nil, `this > -1`,
+			"negative literal -1 cannot be represented by the unsigned uint32 field"},
+		{"uint32_wide", map[string]PathAttr{"": PathUInt32}, nil, `this != 4294967296u`,
+			"outside the domain of the uint32 value"},
+		{"int64_uint_max", map[string]PathAttr{"": PathInt64}, nil, `this == 18446744073709551615u`,
+			"outside the domain of the int64 value"},
+		{"in_list", map[string]PathAttr{"": PathInt32}, nil, `this in [1, 2, 5000000000]`,
+			"outside the domain of the int32 value"},
+		{"float_overflow", map[string]PathAttr{"": PathFloat}, nil, `this < 1e40`,
+			"outside the finite range of the `float` field's Lean type Float32"},
+		{"message_rule_leaf", map[string]PathAttr{"stock": PathInt32}, fields,
+			`this.stock < 3000000000`, "outside the domain of the int32 value"},
+		{"message_rule_uint", map[string]PathAttr{"batch": PathUInt32}, fields,
+			`this.batch == -5`, "negative literal -5"},
+		// Map-selection leaves are typed too (`m.k` on a map<string, int32>).
+		{"map_value_leaf", map[string]PathAttr{"": PathMapSelect, "counts": PathInt32}, nil,
+			`this.counts > 3000000000`, "outside the domain of the int32 value"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := Translate(tt.cel, Options{ThisFields: tt.this, PathAttrs: tt.attrs})
+			if err == nil {
+				t.Fatalf("Translate(%q) succeeded, want error containing %q", tt.cel, tt.frag)
+			}
+			if !strings.Contains(err.Error(), tt.frag) {
+				t.Errorf("Translate(%q) error = %v, want substring %q", tt.cel, err, tt.frag)
+			}
+		})
+	}
+
+	// Without descriptor knowledge nothing is rejected (the standalone
+	// translator has no field type to check against).
+	if _, err := Translate(`this < 3000000000`, Options{}); err != nil {
+		t.Errorf("untyped translation should not range-check: %v", err)
+	}
+	// In-domain literals stay accepted, including at the boundaries.
+	for _, ok := range []string{`this >= -2147483648`, `this <= 2147483647`, `this in [0, 1]`} {
+		if _, err := Translate(ok, Options{PathAttrs: map[string]PathAttr{"": PathInt32}}); err != nil {
+			t.Errorf("Translate(%q): unexpected error %v", ok, err)
+		}
+	}
+}
+
 // Literal regex patterns must be inside the Lean engine's subset and are
 // reported for #guard emission.
 func TestRegexGate(t *testing.T) {

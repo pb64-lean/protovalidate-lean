@@ -13,6 +13,29 @@ func LeanIdent(name string) string { return leanIdent(name) }
 // LeanString renders s as a Lean string literal.
 func LeanString(s string) string { return leanString(s) }
 
+// PathAttrForKind resolves a proto scalar-kind name ("int32", "uint64",
+// "float", "enum", ...) to the PathAttr carrying its numeric domain. The
+// corpus driver uses it to state a row's field type the way the plugin's
+// descriptor walk would.
+func PathAttrForKind(name string) (PathAttr, bool) {
+	a, ok := map[string]PathAttr{
+		"enum":     PathEnumInt,
+		"int32":    PathInt32,
+		"sint32":   PathInt32,
+		"sfixed32": PathInt32,
+		"int64":    PathInt64,
+		"sint64":   PathInt64,
+		"sfixed64": PathInt64,
+		"uint32":   PathUInt32,
+		"fixed32":  PathUInt32,
+		"uint64":   PathUInt64,
+		"fixed64":  PathUInt64,
+		"float":    PathFloat,
+		"double":   PathDouble,
+	}[name]
+	return a, ok
+}
+
 // Idents parses a CEL expression and returns every identifier occurring in
 // it (free identifiers and comprehension variables alike). Codegen uses this
 // to choose binder names that can neither collide nor capture.

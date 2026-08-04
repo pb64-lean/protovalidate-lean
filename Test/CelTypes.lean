@@ -41,4 +41,19 @@ structure Flags where
   b : Int32
   c : Int32
 
+/-- Stand-in for a generated enum: CEL compares enums as integers, so the
+plugin routes enum-typed values through the generated `.toInt32` view. -/
+inductive Tier where
+  | «Unknown.Value» (n : Int32)
+  | TIER_UNSPECIFIED
+  | BASIC
+  | PREMIUM
+deriving DecidableEq
+
+def Tier.toInt32 : Tier → Int32
+  | .«Unknown.Value» n => n
+  | .TIER_UNSPECIFIED => 0
+  | .BASIC => 1
+  | .PREMIUM => 2
+
 end CelTest

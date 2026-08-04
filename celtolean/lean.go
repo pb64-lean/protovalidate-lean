@@ -81,6 +81,7 @@ type constNum struct {
 	kind constKind
 	i    int64
 	u    uint64
+	d    float64
 }
 
 // piece is a translated fragment of Lean syntax.
@@ -96,6 +97,13 @@ type piece struct {
 	guards []guard
 	// num is set for constant numeric expressions (Go-side range checking).
 	num *constNum
+	// nums holds the constant elements of a list/map literal, so `this in
+	// [1, 2, 3]` can range-check them against the receiver's domain.
+	nums []*constNum
+	// dom is the proto-derived numeric domain of the fragment, when known
+	// (Options.PathAttrs); it drives literal range checking and the widening
+	// of 32-bit arithmetic to CEL's width. See domain.go.
+	dom *numDom
 	// noArithErr marks operands whose CEL arithmetic cannot error (string/
 	// bytes/list/map literals, folded timestamp/duration constants, now):
 	// arithmetic on them is emitted unguarded.

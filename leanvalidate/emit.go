@@ -221,6 +221,13 @@ func generateFile(gen *protogen.Plugin, f *protogen.File, cfg Config, msgs map[p
 		out.P("-- Lean engine (Cel.Regex) supports — an unsupported pattern would match")
 		out.P("-- nothing at runtime, which is unsound under negation. A failing guard")
 		out.P("-- means the generator's Go-side gate and the Lean engine disagree.")
+		out.P("--")
+		out.P("-- Below each acceptance guard, a differential battery: probe strings walked")
+		out.P("-- out of the pattern's own RE2 syntax tree and labelled by Go's RE2 engine")
+		out.P("-- (the reference `matches` semantics). The Lean engine re-decides every one")
+		out.P("-- at elaboration time, so a language-level disagreement on this pattern")
+		out.P("-- fails the build. Finitely many points: differential testing, not proof of")
+		out.P("-- language equality.")
 		regexes := make([]string, 0, len(fg.regexes))
 		for re := range fg.regexes {
 			regexes = append(regexes, re)
@@ -228,6 +235,9 @@ func generateFile(gen *protogen.Plugin, f *protogen.File, cfg Config, msgs map[p
 		sort.Strings(regexes)
 		for _, re := range regexes {
 			out.P("#guard Cel.Regex.accepts ", celtolean.LeanString(re))
+			for _, pr := range celtolean.RegexProbes(re) {
+				out.P(regexProbeGuard(re, pr))
+			}
 		}
 		out.P()
 	}
@@ -269,6 +279,16 @@ func (fg *fileGen) translate(cel string, opts celtolean.Options) (*celtolean.Res
 	return res, nil
 }
 
+// regexProbeGuard renders one differential probe as a compile-time `#guard`:
+// the Lean engine must answer exactly what Go's RE2 engine answered.
+func regexProbeGuard(pattern string, pr celtolean.RegexProbe) string {
+	call := "Cel.regexMatch " + celtolean.LeanString(pr.Input) + " " + celtolean.LeanString(pattern)
+	if pr.Match {
+		return "#guard " + call
+	}
+	return "#guard !(" + call + ")"
+}
+
 // violationLit renders a Protovalidate.Violation structure literal.
 func violationLit(fieldPath, id, message string) string {
 	return "{ fieldPath := " + celtolean.LeanString(fieldPath) +
@@ -283,6 +303,13 @@ func ruleViolationLit(fieldPath string, r loweredRule) string {
 	}
 	return violationLit(fieldPath, r.id, msg)
 }
+
+// maxChainRules is the size of the reserved h0…hN hypothesis-name pool that
+// decisionChain draws from. Every generated binder (field values, conjunct
+// hypotheses, CEL guard names) is chosen to dodge exactly this pool, so a rule
+// chain longer than it could shadow an outer binder: the generator refuses
+// rather than emitting subtly wrong Lean.
+const maxChainRules = 64
 
 // iteChain renders nested dependent ifs deciding each rule, yielding ok with
 // all hypotheses in scope or the first failing rule's else-branch text.
@@ -403,6 +430,12 @@ func (fg *fileGen) renderProps(p *fieldPlan, subject string) (string, error) {
 func (fg *fileGen) decisionChain(w *strings.Builder, indent string, p *fieldPlan, subject, fieldPath string,
 	okOf func(proof string) string, conjOf func(hc string) string, hcName string) error {
 	n := len(p.rules)
+	if n > maxChainRules {
+		return fmt.Errorf("field %s carries %d rules, but the generator reserves only %d inner "+
+			"hypothesis names (h0…h%d) for a rule chain; every other binder is chosen to dodge that pool, "+
+			"so a longer chain could capture one. Split the rules across fields or combine them into fewer "+
+			"CEL expressions", p.protoName, n, maxChainRules, maxChainRules-1)
+	}
 	conds := make([]string, 0, n)
 	errs := make([]string, 0, n)
 	hyps := make([]string, 0, n)
@@ -740,7 +773,7 @@ func (fg *fileGen) emitMessage(w *strings.Builder, mi *msgInfo) error {
 	for k := range ruleIdents {
 		binderTaken[k] = true
 	}
-	for i := 0; i < 64; i++ {
+	for i := 0; i < maxChainRules; i++ {
 		binderTaken[fmt.Sprintf("h%d", i)] = true
 	}
 	binderTaken["h_z"] = true
@@ -1449,7 +1482,7 @@ func (fg *fileGen) emitOneofSum(w *strings.Builder, m *protogen.Message, op *one
 	for k := range ruleIdents {
 		taken[k] = true
 	}
-	for i := 0; i < 64; i++ {
+	for i := 0; i < maxChainRules; i++ {
 		taken[fmt.Sprintf("h%d", i)] = true
 	}
 	taken["h_z"] = true

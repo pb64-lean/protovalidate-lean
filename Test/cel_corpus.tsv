@@ -99,3 +99,38 @@ ts_cmp	Cel.Timestamp	-	this < timestamp('2030-01-01T00:00:00Z')
 dur_cmp	Cel.Duration	-	this <= duration('1h')
 ts_within	Cel.Timestamp	-	now - this <= duration('24h') && this <= now
 ts_window	Cel.Timestamp	-	this >= timestamp('2020-01-01T00:00:00Z') && this < timestamp('2030-01-01T00:00:00Z')
+
+# -- descriptor-aware numeric domains -----------------------------------------
+# `dom=<proto kind>` supplies the field typing the protoc plugin derives from
+# the descriptors. Integer arithmetic then renders at CEL's 64-bit width, so the
+# Cel.*Ok guard is the exact CEL condition instead of a conservative 32-bit one
+# (out-of-domain literals are rejected outright and cannot appear here).
+dom_int32_mul	Int32	dom=int32	this * 100 <= 1000000
+dom_int32_wide_intermediate	Int32	dom=int32	this + 3000000000 > 0
+dom_int32_divmod	Int32	dom=int32	this / 2 <= 50 && this % 100 == 0
+dom_int32_neg	Int32	dom=int32	-this < 0
+dom_int32_bounds	Int32	dom=int32	this >= -2147483648 && this <= 2147483647
+dom_uint32_sub	UInt32	dom=uint32	this - 1u >= 0u
+dom_uint32_wide	UInt32	dom=uint32	this * 2u < 8589934592u
+dom_uint64_add	UInt64	dom=uint64	this + 1u > 0u
+dom_int64_arith	Int64	dom=int64	this * 2 + 1 <= 100
+dom_float_range	Float32	dom=float	this >= -3.4e38 && this <= 3.4e38
+dom_double_range	Float	dom=double	this * 2.0 <= 1e300
+dom_enum_int	CelTest.Tier	dom=enum	this >= 1 && this != 3
+dom_enum_arith	CelTest.Tier	dom=enum	this + 1 == 2
+
+# -- regex differential battery -----------------------------------------------
+# Every literal pattern is gated by the Go port of the Lean engine's grammar and
+# then re-checked in Lean: `#guard Cel.Regex.accepts` (acceptance) plus probe
+# strings walked out of the pattern and labelled by Go's RE2 engine, which the
+# Lean engine must reproduce exactly at elaboration time.
+regex_uuid	String	-	this.matches('^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$')
+regex_alternation	String	-	this.matches('^(cat|dog)$')
+regex_perl_classes	String	-	this.matches('^\\d+\\s\\w+$')
+regex_bounded_reps	String	-	this.matches('^a{2,3}b+c?$')
+regex_escaped_punct	String	-	this.matches('^\\.\\$\\(x\\)$')
+regex_unanchored	String	-	this.matches('wgt-[0-9]+')
+regex_hex_escape	String	-	this.matches('^\\x41[\\x30-\\x39]$')
+regex_negated_class	String	-	this.matches('^[^0-9]+$')
+regex_any_char	String	-	this.matches('^a.c$')
+regex_nested_group	String	-	this.matches('^(?:ab|cd)+(e|f)?$')

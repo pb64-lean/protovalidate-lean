@@ -14,7 +14,9 @@
 //
 // The corpus is tab-separated: name, Lean type of `this`, flags, CEL
 // expression. Flags are `-` (none) or a comma list; `nodec` skips the
-// Decidable instance assertion for that row. Lines starting with '#' and
+// Decidable instance assertion for that row, `dom=<proto kind>` supplies the
+// descriptor knowledge the protoc plugin would (literal range checking and
+// CEL-width arithmetic for a field of that kind). Lines starting with '#' and
 // blank lines are ignored.
 package main
 
@@ -144,7 +146,29 @@ func runBatch(path, namespace, varName, imports string, out io.Writer) error {
 		}
 		seen[name] = true
 
-		res, err := celtolean.Translate(cel, celtolean.Options{Var: varName})
+		nodec := false
+		var attrs map[string]celtolean.PathAttr
+		for _, f := range strings.Split(flags, ",") {
+			f = strings.TrimSpace(f)
+			switch {
+			case f == "" || f == "-":
+			case f == "nodec":
+				nodec = true
+			case strings.HasPrefix(f, "dom="):
+				// Descriptor knowledge the plugin would supply: `this` is a
+				// field of this proto kind, which enables literal range
+				// checking and CEL-width arithmetic.
+				attr, ok := celtolean.PathAttrForKind(strings.TrimPrefix(f, "dom="))
+				if !ok {
+					return fmt.Errorf("%s:%d: unknown proto kind in flag %q", src, lineNo, f)
+				}
+				attrs = map[string]celtolean.PathAttr{"": attr}
+			default:
+				return fmt.Errorf("%s:%d: unknown flag %q", src, lineNo, f)
+			}
+		}
+
+		res, err := celtolean.Translate(cel, celtolean.Options{Var: varName, PathAttrs: attrs})
 		if err != nil {
 			return fmt.Errorf("%s:%d (%s): %v", src, lineNo, name, err)
 		}
@@ -155,17 +179,6 @@ func runBatch(path, namespace, varName, imports string, out io.Writer) error {
 			fmt.Fprintf(os.Stderr, "%s:%d (%s): warning: %s\n", src, lineNo, name, warning)
 		}
 
-		nodec := false
-		for _, f := range strings.Split(flags, ",") {
-			switch strings.TrimSpace(f) {
-			case "", "-":
-			case "nodec":
-				nodec = true
-			default:
-				return fmt.Errorf("%s:%d: unknown flag %q", src, lineNo, f)
-			}
-		}
-
 		fmt.Fprintf(w, "\n/-- CEL: `%s` -/\n", strings.ReplaceAll(cel, "\n", " "))
 		fmt.Fprintf(w, "abbrev %s (%s : %s) : Prop := %s\n", name, res.Var, leanType, res.Lean)
 		if !nodec {
@@ -173,8 +186,18 @@ func runBatch(path, namespace, varName, imports string, out io.Writer) error {
 		}
 		for _, re := range res.Regexes {
 			// Acceptance backstop: the Lean engine must accept every literal
-			// pattern the Go gate accepted, or the build fails here.
+			// pattern the Go gate accepted, or the build fails here. Then a
+			// differential battery: probe strings derived from the pattern and
+			// labelled by Go's RE2 engine, re-decided by the Lean engine.
 			fmt.Fprintf(w, "#guard Cel.Regex.accepts %s\n", celtolean.LeanString(re))
+			for _, pr := range celtolean.RegexProbes(re) {
+				call := fmt.Sprintf("Cel.regexMatch %s %s", celtolean.LeanString(pr.Input), celtolean.LeanString(re))
+				if pr.Match {
+					fmt.Fprintf(w, "#guard %s\n", call)
+				} else {
+					fmt.Fprintf(w, "#guard !(%s)\n", call)
+				}
+			}
 		}
 	}
 	if err := scanner.Err(); err != nil {

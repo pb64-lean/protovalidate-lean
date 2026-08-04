@@ -66,8 +66,10 @@ type Options struct {
 	// at `this` (dotted CEL paths, "" denoting `this` itself), letting the
 	// otherwise type-free translation handle constructs whose Lean rendering
 	// depends on the proto type: enum-typed values (CEL treats them as ints;
-	// the generated inductive needs its `.toInt32` view) and map selection
-	// sugar (`m.key`, which must become guarded indexing).
+	// the generated inductive needs its `.toInt32` view), map selection sugar
+	// (`m.key`, which must become guarded indexing), and the numeric domains
+	// that make literal range checking and CEL-exact arithmetic possible
+	// (see domain.go).
 	PathAttrs map[string]PathAttr
 }
 
@@ -82,6 +84,15 @@ const (
 	// (`m.key`) is emitted as guarded indexing `m["key"]` (CEL errors on a
 	// missing key, so the guard makes the proposition false).
 	PathMapSelect
+	// The numeric domains: the proto scalar kind of the value, which fixes
+	// the Lean type its literals elaborate against and the width CEL
+	// arithmetic on it must be performed at.
+	PathInt32  // int32, sint32, sfixed32
+	PathInt64  // int64, sint64, sfixed64
+	PathUInt32 // uint32, fixed32
+	PathUInt64 // uint64, fixed64
+	PathFloat  // float  (Lean Float32)
+	PathDouble // double (Lean Float)
 )
 
 // ThisField describes how a message field is reachable in ThisFields mode.
@@ -368,7 +379,7 @@ func (t *translator) literal(e ast.Expr) (piece, error) {
 		if float64(v) < 0 {
 			p.prec = precNeg
 		}
-		p.num = &constNum{kind: constDouble}
+		p.num = &constNum{kind: constDouble, d: float64(v)}
 		return p, nil
 	case types.String:
 		p := atom(leanString(string(v)), kTerm)
@@ -398,12 +409,9 @@ func (t *translator) ident(name string) (piece, error) {
 		} else {
 			p = atom(leanIdent(t.varName), kTerm)
 		}
-		if t.pathAttrs[""] == PathEnumInt {
-			// Enum-typed `this`: CEL compares enums as ints; use the
-			// generated inductive's integer view.
-			p = atom(p.text+".toInt32", kTerm)
-		}
-		return p, nil
+		// Descriptor knowledge about `this` itself: the enum integer view and
+		// the numeric domain driving literal range checks / arithmetic width.
+		return t.applyPathAttr(p, "", true), nil
 	case len(t.bound[name]) > 0:
 		return atom(leanIdent(t.bound[name][len(t.bound[name])-1]), kTerm), nil
 	case name == "now":
@@ -463,7 +471,7 @@ func (t *translator) selectExpr(sel ast.SelectExpr, deeper bool) (piece, error) 
 			return piece{}, err
 		}
 		p := t.guardedIndex(op, leanString(sel.FieldName()))
-		return t.applyPathAttr(p, ownPath), nil
+		return t.applyPathAttr(p, ownPath, onPath), nil
 	}
 
 	var p piece
@@ -489,7 +497,7 @@ func (t *translator) selectExpr(sel ast.SelectExpr, deeper bool) (piece, error) 
 		}
 		p = piece{text: op.at(precApp+1) + "." + leanIdent(field), prec: precAtom, kind: kTerm, guards: op.guards}
 	}
-	p = t.applyPathAttr(p, ownPath)
+	p = t.applyPathAttr(p, ownPath, onPath)
 	if sel.IsTestOnly() {
 		// Unreachable with macros disabled, but translate faithfully.
 		return t.presence(p), nil
@@ -507,12 +515,24 @@ func (t *translator) selectOperand(sel ast.SelectExpr, deeper bool) (piece, erro
 }
 
 // applyPathAttr rewrites a rendered path value per its proto-derived
-// attribute (currently the enum integer view).
-func (t *translator) applyPathAttr(p piece, path string) piece {
-	if path == "" || t.pathAttrs[path] != PathEnumInt {
+// attribute: the enum integer view, and the numeric domain (attached to the
+// fragment, not rendered) that literal range checking and arithmetic widening
+// consume. known is false when the fragment is not a `this`-rooted path.
+func (t *translator) applyPathAttr(p piece, path string, known bool) piece {
+	if !known {
 		return p
 	}
-	return piece{text: p.at(precApp+1) + ".toInt32", prec: precAtom, kind: kTerm, guards: p.guards}
+	attr, ok := t.pathAttrs[path]
+	if !ok {
+		return p
+	}
+	if attr == PathEnumInt {
+		p = piece{text: p.at(precApp+1) + ".toInt32", prec: precAtom, kind: kTerm, guards: p.guards}
+	}
+	if d := attr.domain(); d != nil {
+		p.dom = d
+	}
+	return p
 }
 
 // guardedIndex renders indexing with CEL's error semantics: the element via
@@ -541,6 +561,7 @@ func (t *translator) list(l ast.ListExpr) (piece, error) {
 	// list-typed comparisons and memberships line up.
 	parts := make([]string, 0, len(l.Elements()))
 	var guards []guard
+	var nums []*constNum
 	for _, el := range l.Elements() {
 		p, err := t.expr(el)
 		if err != nil {
@@ -548,9 +569,13 @@ func (t *translator) list(l ast.ListExpr) (piece, error) {
 		}
 		parts = append(parts, p.text)
 		guards = append(guards, p.guards...)
+		if p.num != nil {
+			nums = append(nums, p.num)
+		}
 	}
 	out := atom("#["+strings.Join(parts, ", ")+"]", kTerm)
 	out.guards = guards
+	out.nums = nums
 	out.noArithErr = true // list concatenation cannot error
 	return out, nil
 }
@@ -558,6 +583,7 @@ func (t *translator) list(l ast.ListExpr) (piece, error) {
 func (t *translator) mapLit(m ast.MapExpr) (piece, error) {
 	parts := make([]string, 0, len(m.Entries()))
 	var guards []guard
+	var keyNums []*constNum
 	for _, entry := range m.Entries() {
 		me := entry.AsMapEntry()
 		k, err := t.expr(me.Key())
@@ -571,12 +597,18 @@ func (t *translator) mapLit(m ast.MapExpr) (piece, error) {
 		parts = append(parts, "("+k.text+", "+v.text+")")
 		guards = append(guards, k.guards...)
 		guards = append(guards, v.guards...)
+		if k.num != nil {
+			// `e in {…}` tests key membership, so the keys are what a typed
+			// left operand's domain must accept.
+			keyNums = append(keyNums, k.num)
+		}
 	}
 	return piece{
 		text:       "Std.HashMap.ofList [" + strings.Join(parts, ", ") + "]",
 		prec:       precApp,
 		kind:       kTerm,
 		guards:     guards,
+		nums:       keyNums,
 		noArithErr: true,
 	}, nil
 }
@@ -703,9 +735,9 @@ func (t *translator) call(c ast.CallExpr) (piece, error) {
 	case operators.Multiply:
 		return t.arith(arithOp("*"), "mulOk", args)
 	case operators.Divide:
-		return t.binaryArgs(arithOp("/"), args)
+		return t.arith(arithOp("/"), "", args)
 	case operators.Modulo:
-		return t.binaryArgs(arithOp("%"), args)
+		return t.arith(arithOp("%"), "", args)
 	case operators.Index:
 		return t.index(args)
 	case operators.Conditional:
@@ -726,15 +758,30 @@ func (t *translator) binaryArgs(op binOp, args []ast.Expr) (piece, error) {
 	if err != nil {
 		return piece{}, err
 	}
+	// Descriptor-aware checks: a literal outside the typed operand's domain
+	// would silently wrap at elaboration, and two proto integers of different
+	// widths only unify once the narrower one is lifted to CEL's width.
+	if err := t.checkLiterals(l, r); err != nil {
+		return piece{}, err
+	}
+	l, r = t.unifyWidth(l, r)
 	return t.binary(op, l, r), nil
 }
 
-// arith renders +/-/* with CEL's overflow-error semantics: constant operands
-// fold and range-check in Go; otherwise a Cel.addOk/subOk/mulOk guard is
-// attached, so an evaluation that would overflow in CEL falsifies the guarded
-// proposition. Operands that cannot produce arithmetic errors (string/bytes/
-// list/map literals, timestamp/duration constants, now) skip the guard —
-// concatenation and the time model are total.
+// arith renders +/-/*/(/)/(%) with CEL's overflow-error semantics: constant
+// operands fold and range-check in Go; otherwise (okFn non-empty) a
+// Cel.addOk/subOk/mulOk guard is attached, so an evaluation that would
+// overflow in CEL falsifies the guarded proposition. Operands that cannot
+// produce arithmetic errors (string/bytes/list/map literals,
+// timestamp/duration constants, now) skip the guard — concatenation and the
+// time model are total. Division and modulo agree with CEL in range and need
+// no guard, but do take part in widening.
+//
+// Widening: CEL performs *all* integer arithmetic at 64 bits, so a 32-bit
+// proto field whose domain the plugin supplied is lifted to its CEL width
+// first (`x.toInt64`). That makes both the result and the emitted guard
+// CEL-exact, instead of the conservative 32-bit condition the untyped
+// translation has to assume.
 func (t *translator) arith(op binOp, okFn string, args []ast.Expr) (piece, error) {
 	l, err := t.expr(args[0])
 	if err != nil {
@@ -744,8 +791,16 @@ func (t *translator) arith(op binOp, okFn string, args []ast.Expr) (piece, error
 	if err != nil {
 		return piece{}, err
 	}
+	l, r = t.widen(l), t.widen(r)
+	if err := t.checkLiterals(l, r); err != nil {
+		return piece{}, err
+	}
 	out := t.binary(op, l, r)
+	out.dom = arithDom(l, r)
 	switch {
+	case okFn == "":
+		// Division/modulo: no CEL error to guard (the fixed-width Lean
+		// operators truncate toward zero exactly like CEL).
 	case l.num != nil && r.num != nil:
 		// Constant arithmetic: range-check the folded value here (there is
 		// no typed operand to anchor an ArithOk guard). Mixed const domains
@@ -823,7 +878,8 @@ func (t *translator) negate(arg ast.Expr) (piece, error) {
 	if err != nil {
 		return piece{}, err
 	}
-	out := piece{text: "-" + p.at(precNeg), prec: precNeg, kind: kTerm, guards: p.guards}
+	p = t.widen(p) // CEL negates at 64-bit width
+	out := piece{text: "-" + p.at(precNeg), prec: precNeg, kind: kTerm, guards: p.guards, dom: p.dom}
 	switch {
 	case p.num != nil:
 		switch p.num.kind {
@@ -862,6 +918,10 @@ func (t *translator) equality(fn string, args []ast.Expr) (piece, error) {
 	if rerr != nil {
 		return piece{}, rerr
 	}
+	if err := t.checkLiterals(l, r); err != nil {
+		return piece{}, err
+	}
+	l, r = t.unifyWidth(l, r)
 	if l.kind == kProp || r.kind == kProp {
 		guards := mergeGuards(l, r)
 		l, r = t.liftProp(l), t.liftProp(r)
@@ -961,11 +1021,15 @@ func (t *translator) conditional(args []ast.Expr) (piece, error) {
 		resKind = kProp
 	case a.kind == kBool && b.kind == kBool:
 		resKind = kBool
+	default:
+		// Both branches are values: they must elaborate at one Lean type.
+		a, b = t.unifyWidth(a, b)
 	}
 	return piece{
 		text: "if " + cond.text + " then " + a.text + " else " + b.text,
 		prec: precLow,
 		kind: resKind,
+		dom:  arithDom(a, b),
 		// Term/Bool branch guards float (conservative: both branches must be
 		// error-free); Prop branch guards were closed per-branch above.
 		guards: mergeGuards(cond, a, b),

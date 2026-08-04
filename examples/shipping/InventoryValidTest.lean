@@ -54,6 +54,12 @@ def main : IO Unit := do
   expectId (Valid.Product.validate { goodProduct with contact := "" }) "" "email ignore-zero escape"
   expectId (Valid.Product.validate { goodProduct with region := "mars" }) "string.in" "in"
   expectId (Valid.Product.validate { goodProduct with stock := -1 }) "int32.gt_lt" "int range"
+  -- descriptor-aware arithmetic: `this * 10000` is evaluated at CEL's 64-bit
+  -- width, so an intermediate outside Int32 is not an overflow. stock = 300000
+  -- makes the product 3e9 (> Int32.maxValue) and must still pass; the
+  -- conservative 32-bit guard this replaces rejected it.
+  expectId (Valid.Product.validate { goodProduct with stock := 300000 }) "" "widened arithmetic in range"
+  expectId (Valid.Product.validate { goodProduct with stock := 600000 }) "stock.reserved" "widened arithmetic out of range"
   expectId (Valid.Product.validate { goodProduct with price_cents := 0 }) "required" "required non-zero"
   expectId (Valid.Product.validate { goodProduct with rating := 9.0 }) "double.gt_lt" "float range"
   expectId (Valid.Product.validate { goodProduct with published := false }) "" "bool ignore-zero escape"

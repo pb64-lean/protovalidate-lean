@@ -3,10 +3,12 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 go_library(
     name = "celtolean",
     srcs = [
+        "domain.go",
         "exports.go",
         "functions.go",
         "lean.go",
         "regexcheck.go",
+        "regexprobe.go",
         "translate.go",
     ],
     importpath = "github.com/petersonbill64/protovalidate-lean/celtolean",

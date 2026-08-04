@@ -22,7 +22,17 @@ message Product {
                       (buf.validate.field).ignore = IGNORE_IF_ZERO_VALUE];
   optional string homepage = 3 [(buf.validate.field).string.uri = true];
   string region = 4 [(buf.validate.field).string = { in: ["us", "eu", "ap"] }];
-  int32 stock = 5 [(buf.validate.field).int32 = { gte: 0, lt: 1000000 }];
+  int32 stock = 5 [(buf.validate.field).int32 = { gte: 0, lt: 1000000 },
+                   (buf.validate.field).cel = {
+                     // descriptor-aware arithmetic: CEL multiplies at 64 bits,
+                     // so the emitted guard is CEL's exact condition and the
+                     // product may leave the int32 range (a conservative
+                     // 32-bit guard would reject stock >= 214_749). The
+                     // 5e9 bound is likewise legal only because the widened
+                     // result is Int64.
+                     id: "stock.reserved", message: "reserved capacity must stay under the cap",
+                     expression: "this * 10000 <= 5000000000"
+                   }];
   int64 price_cents = 6 [(buf.validate.field).int64.gt = 0,
                          (buf.validate.field).required = true];
   uint32 batch = 7 [(buf.validate.field).uint32 = { in: [1, 2, 3] }];
