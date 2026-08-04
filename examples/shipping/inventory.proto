@@ -57,6 +57,25 @@ message Product {
   }];
   optional string owner = 14 [(buf.validate.field).required = true,
                               (buf.validate.field).string.min_len = 2];
+  repeated int32 lot_sizes = 16 [(buf.validate.field).cel = {
+    // A comprehension binder carries the element's descriptor type: the
+    // literal is range-checked at int32 and the product widens to the 64-bit
+    // width CEL multiplies at (`5e9` is only legal because of that).
+    id: "lots.capacity", message: "each lot must stay under the reserved cap",
+    expression: "this.all(n, n * 10000 <= 5000000000)"
+  }];
+  repeated Tier tier_history = 17 [(buf.validate.field).cel = {
+    // Enum elements compare as ints, through the generated .toInt32 view.
+    id: "tiers.known", message: "every recorded tier must be a known tier",
+    expression: "this.all(t, t <= 3)"
+  }];
+  option (buf.validate.message).cel = {
+    // Indexed elements are typed too: an enum reached through indexing gets
+    // the same integer view (guarded, since CEL errors out of range).
+    id: "product.first_tier",
+    message: "the first recorded tier must be assigned",
+    expression: "this.tier_history.size() == 0 || this.tier_history[0] >= 1"
+  };
 }
 
 message Payment {

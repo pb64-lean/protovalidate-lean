@@ -62,7 +62,7 @@ type Options struct {
 	// other use of `this`.
 	ThisFields map[string]ThisField
 
-	// PathAttrs supplies proto-descriptor knowledge for select paths rooted
+	// PathAttrs supplies proto-descriptor knowledge for value paths rooted
 	// at `this` (dotted CEL paths, "" denoting `this` itself), letting the
 	// otherwise type-free translation handle constructs whose Lean rendering
 	// depends on the proto type: enum-typed values (CEL treats them as ints;
@@ -70,8 +70,24 @@ type Options struct {
 	// (`m.key`, which must become guarded indexing), and the numeric domains
 	// that make literal range checking and CEL-exact arithmetic possible
 	// (see domain.go).
+	//
+	// A path may descend into a container: `IterElem(p)` names what a
+	// comprehension over `p` binds (a repeated field's elements, a map's
+	// keys) and `IndexElem(p)` names what `p[i]` yields (a repeated field's
+	// elements, a map's values). Those keys type comprehension binders and
+	// indexed values, which are otherwise unclassified. Paths compose:
+	// `this.all(o, o.qty > 5)` on a repeated message field asks for
+	// `"[].qty"`.
 	PathAttrs map[string]PathAttr
 }
+
+// IterElem builds the PathAttrs key for the value a comprehension over `path`
+// binds: a repeated field's element type, a map's key type.
+func IterElem(path string) string { return path + "[]" }
+
+// IndexElem builds the PathAttrs key for the value `path[i]` yields: a
+// repeated field's element type, a map's value type.
+func IndexElem(path string) string { return path + "[*]" }
 
 // PathAttr classifies a select path for PathAttrs.
 type PathAttr int
@@ -154,7 +170,7 @@ func Translate(cel string, opts Options) (*Result, error) {
 		thisFields: opts.ThisFields,
 		pathAttrs:  opts.PathAttrs,
 		used:       used,
-		bound:      map[string][]string{},
+		bound:      map[string][]binding{},
 		warned:     map[string]bool{},
 		regexes:    map[string]bool{},
 	}
@@ -247,9 +263,9 @@ type translator struct {
 	pathAttrs  map[string]PathAttr  // proto typing knowledge for `this` paths
 	used       map[string]bool      // identifiers occurring in the expression
 	// bound maps a CEL comprehension variable in scope to the Lean name it is
-	// emitted as (renamed when it would capture varRoot); a stack per name
-	// handles shadowing.
-	bound    map[string][]string
+	// emitted as (renamed when it would capture varRoot) and the PathAttrs
+	// path of the value it ranges over; a stack per name handles shadowing.
+	bound    map[string][]binding
 	warnings []string
 	warned   map[string]bool
 	regexes  map[string]bool // literal regex patterns (for #guard emission)
@@ -413,7 +429,11 @@ func (t *translator) ident(name string) (piece, error) {
 		// the numeric domain driving literal range checks / arithmetic width.
 		return t.applyPathAttr(p, "", true), nil
 	case len(t.bound[name]) > 0:
-		return atom(leanIdent(t.bound[name][len(t.bound[name])-1]), kTerm), nil
+		// A comprehension binder carries the descriptor typing of the element
+		// it ranges over, so literals it meets are range-checked and enum
+		// elements get their integer view just like a named field would.
+		b := t.bound[name][len(t.bound[name])-1]
+		return t.applyPathAttr(atom(leanIdent(b.lean), kTerm), b.path, b.known), nil
 	case name == "now":
 		t.warn("`now` maps to Cel.now: the refinement becomes evaluation-time dependent; " +
 			"consider keeping such constraints outside the subtype")
@@ -426,24 +446,61 @@ func (t *translator) ident(name string) (piece, error) {
 	}
 }
 
-// celPath renders the dotted CEL path of a select chain rooted at `this`
-// ("" for `this` itself); ok is false for other shapes.
-func celPath(e ast.Expr) (string, bool) {
+// binding is a comprehension variable in scope.
+type binding struct {
+	lean  string // Lean name emitted for it
+	path  string // PathAttrs path of the value it ranges over
+	known bool   // whether that path is resolvable ("" is a valid path)
+}
+
+// celPath renders the PathAttrs path of a value expression rooted at `this`
+// ("" for `this` itself); ok is false for other shapes. `lookup` resolves a
+// comprehension variable to the path of the value it ranges over, so paths
+// reach through binders (`this.all(o, o.qty)` → `[].qty`); pass nil for a
+// binder-free reading.
+func celPath(e ast.Expr, lookup func(string) (string, bool)) (string, bool) {
 	switch e.Kind() {
 	case ast.IdentKind:
-		if e.AsIdent() == "this" {
+		name := e.AsIdent()
+		if lookup != nil {
+			if p, ok := lookup(name); ok {
+				return p, true
+			}
+		}
+		if name == "this" {
 			return "", true
 		}
 	case ast.SelectKind:
 		s := e.AsSelect()
-		if p, ok := celPath(s.Operand()); ok {
+		if p, ok := celPath(s.Operand(), lookup); ok {
 			if p == "" {
 				return s.FieldName(), true
 			}
 			return p + "." + s.FieldName(), true
 		}
+	case ast.CallKind:
+		c := e.AsCall()
+		if !c.IsMemberFunction() && c.FunctionName() == operators.Index && len(c.Args()) == 2 {
+			if p, ok := celPath(c.Args()[0], lookup); ok {
+				return IndexElem(p), true
+			}
+		}
 	}
 	return "", false
+}
+
+// bindingPath resolves a comprehension variable in the translator's scope.
+func (t *translator) bindingPath(name string) (string, bool) {
+	if st := t.bound[name]; len(st) > 0 {
+		b := st[len(st)-1]
+		return b.path, b.known
+	}
+	return "", false
+}
+
+// pathOf is celPath in the translator's binder scope.
+func (t *translator) pathOf(e ast.Expr) (string, bool) {
+	return celPath(e, t.bindingPath)
 }
 
 // selectExpr renders a field selection. deeper marks selections whose result
@@ -453,7 +510,7 @@ func celPath(e ast.Expr) (string, bool) {
 // select the getter — giving chains CEL's default-instance traversal
 // semantics (`this.a.b.c` → `x.aD.bD.c`).
 func (t *translator) selectExpr(sel ast.SelectExpr, deeper bool) (piece, error) {
-	operandPath, onPath := celPath(sel.Operand())
+	operandPath, onPath := t.pathOf(sel.Operand())
 	ownPath := ""
 	if onPath {
 		if operandPath == "" {
@@ -950,7 +1007,14 @@ func (t *translator) index(args []ast.Expr) (piece, error) {
 		return piece{}, err
 	}
 	recv.guards = mergeGuards(recv, idx)
-	return t.guardedIndex(recv, idx.text), nil
+	p := t.guardedIndex(recv, idx.text)
+	// The indexed value inherits the container's element typing (a map's
+	// value type), so its literals are range-checked and enum elements reached
+	// through indexing get their integer view.
+	if path, ok := t.pathOf(args[0]); ok {
+		p = t.applyPathAttr(p, IndexElem(path), true)
+	}
+	return p, nil
 }
 
 // boolLitArg reports whether e is the literal true/false, and which.

@@ -51,7 +51,7 @@ func (t *translator) function(c ast.CallExpr) (piece, error) {
 		// presence delegates to the generated has_<field> predicate, which
 		// encodes CEL's per-category semantics (case test, isSome, non-empty,
 		// non-default). Intermediate path hops default-traverse as usual.
-		if opPath, ok := celPath(sel.Operand()); ok && t.pathAttrs[opPath] == PathMapSelect {
+		if opPath, ok := t.pathOf(sel.Operand()); ok && t.pathAttrs[opPath] == PathMapSelect {
 			// has(m.key) on a map: CEL presence of the key.
 			op, err := t.selectOperand(sel, false)
 			if err != nil {
@@ -310,7 +310,14 @@ func (t *translator) macro(fn string, c ast.CallExpr) (piece, error) {
 		emitted = freshName(v, t.used)
 		t.used[emitted] = true
 	}
-	t.bound[v] = append(t.bound[v], emitted)
+	// The binder ranges over the receiver's elements (a map's keys), so it
+	// inherits their descriptor typing: literals it meets are range-checked
+	// against the element domain and enum elements get their integer view.
+	elemPath, elemKnown := "", false
+	if p, ok := t.pathOf(c.Target()); ok {
+		elemPath, elemKnown = IterElem(p), true
+	}
+	t.bound[v] = append(t.bound[v], binding{lean: emitted, path: elemPath, known: elemKnown})
 	defer func() { t.bound[v] = t.bound[v][:len(t.bound[v])-1] }()
 
 	body := func(e ast.Expr, adapt func(piece) piece) (piece, error) {

@@ -76,6 +76,23 @@ def main : IO Unit := do
   expectId (Valid.Product.validate { goodProduct with owner := some "x" }) "string.min_len" "owner min_len"
   expectId (Valid.Product.validate { goodProduct with homepage := some "not a uri" }) "string.uri" "uri"
 
+  -- Comprehension binders carry the element's descriptor type: the product is
+  -- computed at CEL's 64-bit width (300000 * 10000 = 3e9 leaves Int32 and is
+  -- still fine), and enum elements compare through their .toInt32 view.
+  expectId (Valid.Product.validate { goodProduct with lot_sizes := #[1, 300000] }) "" "binder widened arithmetic"
+  expectId (Valid.Product.validate { goodProduct with lot_sizes := #[1, 600000] }) "lots.capacity" "binder arithmetic out of range"
+  expectId (Valid.Product.validate { goodProduct with tier_history := #[.BASIC, .PREMIUM] }) "" "enum elements as ints"
+  expectId (Valid.Product.validate { goodProduct with tier_history := #[.«Unknown.Value» 42] })
+    "tiers.known" "enum element above bound"
+  -- An enum reached through indexing gets the same integer view, under the
+  -- guard that makes an out-of-range index false (CEL's error). The empty
+  -- array takes the size() disjunct, so the guard is never forced.
+  expectId (Valid.Product.validate { goodProduct with tier_history := #[.LEGACY, .TIER_UNSPECIFIED] })
+    "" "indexed enum element"
+  expectId (Valid.Product.validate { goodProduct with tier_history := #[.TIER_UNSPECIFIED, .BASIC] })
+    "product.first_tier" "indexed enum element below bound"
+  expectId (Valid.Product.validate { goodProduct with tier_history := #[] }) "" "empty array: index guard unforced"
+
   -- encode → decodeValid roundtrip
   let base := v.toBase
   match base.encode with

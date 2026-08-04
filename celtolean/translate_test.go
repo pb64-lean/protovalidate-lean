@@ -307,6 +307,45 @@ func TestPathAttrs(t *testing.T) {
 	}
 }
 
+// Container descents: a comprehension binder and an indexed value carry the
+// element type of what they came from, so the enum integer view and the
+// numeric domains reach inside all/exists/map/filter bodies and index sites.
+func TestContainerElementAttrs(t *testing.T) {
+	tests := []struct {
+		name  string
+		attrs map[string]PathAttr
+		cel   string
+		want  string
+	}{
+		{"enum_binder", map[string]PathAttr{"[]": PathEnumInt},
+			`this.all(v, v == 2)`, `∀ v ∈ x, v.toInt32 = 2`},
+		{"enum_index", map[string]PathAttr{"[*]": PathEnumInt},
+			`this[0] == 2`,
+			`(if h : (x[0]?).isSome then ((x[0]?).get h).toInt32 = 2 else False)`},
+		{"enum_binder_field", map[string]PathAttr{"[].tier": PathEnumInt},
+			`this.exists(o, o.tier == 1)`, `∃ o ∈ x, o.tier.toInt32 = 1`},
+		// 32-bit elements widen to CEL's arithmetic width, exactly as a
+		// 32-bit field does.
+		{"widen_binder", map[string]PathAttr{"[]": PathInt32},
+			`this.all(v, v * 100 > 0)`,
+			`∀ v ∈ x, (if h : Cel.mulOk v.toInt64 100 then v.toInt64 * 100 > 0 else False)`},
+		// Nested containers compose: this[].lots[].
+		{"nested_binder", map[string]PathAttr{"[].lots[]": PathEnumInt},
+			`this.all(o, o.lots.all(n, n == 3))`, `∀ o ∈ x, ∀ n ∈ o.lots, n.toInt32 = 3`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := Translate(tt.cel, Options{PathAttrs: tt.attrs})
+			if err != nil {
+				t.Fatalf("Translate(%q): %v", tt.cel, err)
+			}
+			if got.Lean != tt.want {
+				t.Errorf("Translate(%q)\n  got:  %s\n  want: %s", tt.cel, got.Lean, tt.want)
+			}
+		})
+	}
+}
+
 // Numeric domains (descriptor-supplied) do two things the type-free
 // translation cannot: they reject literals that Lean would silently wrap into
 // the field's fixed-width type, and they lift 32-bit proto integers to the
@@ -384,7 +423,9 @@ func TestNumericDomainWidening(t *testing.T) {
 // (Lean has no range check on `(3000000000 : Int32)`), so they are rejected at
 // generation time.
 func TestNumericDomainRejects(t *testing.T) {
-	fields := map[string]ThisField{"stock": {Text: "stock"}, "batch": {Text: "batch"}}
+	fields := map[string]ThisField{
+		"stock": {Text: "stock"}, "batch": {Text: "batch"}, "items": {Text: "items"},
+	}
 	tests := []struct {
 		name  string
 		attrs map[string]PathAttr
@@ -415,6 +456,18 @@ func TestNumericDomainRejects(t *testing.T) {
 		// Map-selection leaves are typed too (`m.k` on a map<string, int32>).
 		{"map_value_leaf", map[string]PathAttr{"": PathMapSelect, "counts": PathInt32}, nil,
 			`this.counts > 3000000000`, "outside the domain of the int32 value"},
+		// Comprehension binders and indexed elements carry the container's
+		// element typing, so their literals are range-checked as well.
+		{"binder_elem", map[string]PathAttr{"[]": PathInt32}, nil,
+			`this.all(v, v > 3000000000)`, "outside the domain of the int32 value"},
+		{"binder_elem_field", map[string]PathAttr{"[].qty": PathInt32}, nil,
+			`this.all(o, o.qty > 3000000000)`, "outside the domain of the int32 value"},
+		{"nested_binder_elem", map[string]PathAttr{"[].lots[]": PathUInt32}, nil,
+			`this.all(o, o.lots.all(n, n == -1))`, "negative literal -1"},
+		{"index_elem", map[string]PathAttr{"items[*].qty": PathInt32}, fields,
+			`this.items[0].qty < 3000000000`, "outside the domain of the int32 value"},
+		{"map_index_value", map[string]PathAttr{"": PathMapSelect, "[*]": PathUInt32}, nil,
+			`this['k'] == -1`, "negative literal -1"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

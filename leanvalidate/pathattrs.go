@@ -43,7 +43,7 @@ func pathAttrsForField(fd protoreflect.FieldDescriptor, cel string) (map[string]
 	}
 	switch {
 	case fd.IsMap():
-		attrs, err := resolvePaths(paths, resolveNode{mapVal: fd.MapValue()})
+		attrs, err := resolvePaths(paths, resolveNode{container: fd})
 		if err != nil {
 			return nil, err
 		}
@@ -53,7 +53,9 @@ func pathAttrsForField(fd protoreflect.FieldDescriptor, cel string) (map[string]
 		attrs[""] = celtolean.PathMapSelect
 		return attrs, nil
 	case fd.IsList():
-		return nil, nil // selects on a list value are a CEL type error
+		// Selects on a list value are a CEL type error, but its elements are
+		// reachable through comprehensions and indexing.
+		return resolvePaths(paths, resolveNode{container: fd})
 	case fd.Kind() == protoreflect.EnumKind:
 		if len(paths) > 0 {
 			return nil, fmt.Errorf("cannot select fields of the enum-typed value `this`")
@@ -101,11 +103,71 @@ var numericAttr = map[protoreflect.Kind]celtolean.PathAttr{
 	protoreflect.DoubleKind:   celtolean.PathDouble,
 }
 
-// resolveNode is a position while walking a path: either a message, or the
-// value slot of a map (the next path component is a literal key).
+// resolveNode is a position while walking a path: either a message, or a
+// container field (a repeated field, or a map — whose next path component is
+// a literal key, `[]` for its keys, or `[*]` for its values).
 type resolveNode struct {
-	msg    protoreflect.MessageDescriptor
-	mapVal protoreflect.FieldDescriptor
+	msg       protoreflect.MessageDescriptor
+	container protoreflect.FieldDescriptor
+}
+
+// pathComps splits a path into components: field names / map keys, plus the
+// container descents `[]` (iteration element) and `[*]` (index result), which
+// attach without a dot (`items[].qty`).
+func pathComps(p string) []string {
+	var out []string
+	for i := 0; i < len(p); {
+		switch p[i] {
+		case '.':
+			i++
+		case '[':
+			j := strings.IndexByte(p[i:], ']')
+			if j < 0 {
+				return append(out, p[i:])
+			}
+			out = append(out, p[i:i+j+1])
+			i += j + 1
+		default:
+			j := strings.IndexAny(p[i:], ".[")
+			if j < 0 {
+				return append(out, p[i:])
+			}
+			out = append(out, p[i:i+j])
+			i += j
+		}
+	}
+	return out
+}
+
+// joinPath appends a component to a path prefix the way celtolean spells it.
+func joinPath(prefix, comp string) string {
+	if strings.HasPrefix(comp, "[") {
+		return prefix + comp
+	}
+	if prefix == "" {
+		return comp
+	}
+	return prefix + "." + comp
+}
+
+// stepValue classifies the value a field descriptor denotes and returns the
+// position to continue the walk from. asElement views a repeated field as one
+// of its elements (reached through `[]` / `[*]`) rather than as the container.
+func stepValue(fd protoreflect.FieldDescriptor, asElement bool) (celtolean.PathAttr, resolveNode) {
+	if !asElement && fd.IsMap() {
+		return celtolean.PathMapSelect, resolveNode{container: fd}
+	}
+	if !asElement && fd.IsList() {
+		return 0, resolveNode{container: fd}
+	}
+	switch fd.Kind() {
+	case protoreflect.MessageKind, protoreflect.GroupKind:
+		return 0, resolveNode{msg: fd.Message()}
+	case protoreflect.EnumKind:
+		return celtolean.PathEnumInt, resolveNode{}
+	default:
+		return numericAttr[fd.Kind()], resolveNode{}
+	}
 }
 
 func resolvePaths(paths map[string]bool, start resolveNode) (map[string]celtolean.PathAttr, error) {
@@ -120,75 +182,60 @@ func resolvePaths(paths map[string]bool, start resolveNode) (map[string]celtolea
 
 	attrs := map[string]celtolean.PathAttr{}
 	for _, path := range sorted {
-		comps := strings.Split(path, ".")
+		comps := pathComps(path)
 		node := start
 		prefix := ""
 		for i, comp := range comps {
-			withComp := comp
-			if prefix != "" {
-				withComp = prefix + "." + comp
-			}
 			last := i == len(comps)-1
+			withComp := joinPath(prefix, comp)
 
-			if node.mapVal != nil {
-				// comp is a map key; the value type continues the walk.
-				vd := node.mapVal
-				node = resolveNode{}
-				switch vd.Kind() {
-				case protoreflect.MessageKind, protoreflect.GroupKind:
-					node = resolveNode{msg: vd.Message()}
-				case protoreflect.EnumKind:
-					if last {
-						attrs[withComp] = celtolean.PathEnumInt
-					}
-				default:
-					if a, ok := numericAttr[vd.Kind()]; ok && last {
-						attrs[withComp] = a
-					}
-				}
-				if node.msg == nil && !last {
-					break // scalar map value selected further: CEL type error
-				}
-				prefix = withComp
-				continue
-			}
-			if node.msg == nil {
-				break
-			}
-			f := node.msg.Fields().ByName(protoreflect.Name(comp))
-			if f == nil {
-				break // unknown field: handled by head checks / Lean elaboration
-			}
-			node = resolveNode{}
+			// The field descriptor of the value this component denotes.
+			var fd protoreflect.FieldDescriptor
+			asElement := false
 			switch {
-			case f.IsMap():
-				attrs[withComp] = celtolean.PathMapSelect
-				if !last {
-					node = resolveNode{mapVal: f.MapValue()}
+			case node.container != nil:
+				c := node.container
+				switch {
+				case comp == "[]":
+					// Iteration: a repeated field's elements, a map's keys.
+					if c.IsMap() {
+						fd = c.MapKey()
+					} else {
+						fd, asElement = c, true
+					}
+				case comp == "[*]":
+					// Indexing: a repeated field's elements, a map's values.
+					if c.IsMap() {
+						fd = c.MapValue()
+					} else {
+						fd, asElement = c, true
+					}
+				case c.IsMap():
+					fd = c.MapValue() // selection sugar: comp is a literal key
 				}
-			case f.IsList():
-				if !last {
-					// selecting through a list value: CEL type error
-				}
-			case f.Kind() == protoreflect.EnumKind:
-				if last {
-					attrs[withComp] = celtolean.PathEnumInt
-				} else {
-					return nil, fmt.Errorf("path this.%s selects through the enum-typed field %q", path, comp)
-				}
-			case f.Kind() == protoreflect.MessageKind || f.Kind() == protoreflect.GroupKind:
-				node = resolveNode{msg: f.Message()}
-			default:
-				// Scalar leaf: record its numeric domain (literal range
-				// checking, CEL-width arithmetic). Selecting through it is a
-				// CEL type error, caught by the `!last` break below.
-				if a, ok := numericAttr[f.Kind()]; ok && last {
-					attrs[withComp] = a
-				}
+			case node.msg != nil && !strings.HasPrefix(comp, "["):
+				fd = node.msg.Fields().ByName(protoreflect.Name(comp))
 			}
-			if node.msg == nil && node.mapVal == nil && !last {
+			if fd == nil {
+				// Unknown field, or a descent CEL itself rejects (indexing a
+				// message, selecting a field of a list). Left unclassified:
+				// head checks and Lean elaboration cover those.
 				break
 			}
+
+			attr, next := stepValue(fd, asElement)
+			if attr == celtolean.PathEnumInt && !last {
+				return nil, fmt.Errorf("path this.%s selects through the enum-typed field %q", path, comp)
+			}
+			// Map fields are marked wherever they occur (the selection sugar
+			// fires on intermediate hops); everything else only as a leaf.
+			if attr != 0 && (last || attr == celtolean.PathMapSelect) {
+				attrs[withComp] = attr
+			}
+			if next.msg == nil && next.container == nil && !last {
+				break // scalar leaf selected further: CEL type error
+			}
+			node = next
 			prefix = withComp
 		}
 	}

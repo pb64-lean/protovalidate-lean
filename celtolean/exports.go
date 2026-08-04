@@ -4,7 +4,10 @@ package celtolean
 // which composes emitted expressions into full declarations and needs the
 // same lexical conventions the translator uses.
 
-import "github.com/google/cel-go/common/ast"
+import (
+	"github.com/google/cel-go/common/ast"
+	"github.com/google/cel-go/common/operators"
+)
 
 // LeanIdent renders a proto-derived name component as a Lean identifier,
 // guillemet-quoting reserved words.
@@ -51,55 +54,122 @@ func Idents(cel string) (map[string]bool, error) {
 
 // SelectPaths parses a CEL expression and returns every dotted field path
 // rooted at `this` occurring in it (full chains; walking a chain visits its
-// prefixes). The plugin resolves these against the proto descriptors to build
-// Options.PathAttrs (enum integer views, map selection sugar).
+// prefixes), including the container descents `IterElem`/`IndexElem` name:
+// a comprehension binder and an indexed element are values the plugin must
+// type too. The plugin resolves these against the proto descriptors to build
+// Options.PathAttrs (enum integer views, map selection sugar, numeric
+// domains).
 func SelectPaths(cel string) (map[string]bool, error) {
 	root, err := parseCEL(cel)
 	if err != nil {
 		return nil, err
 	}
 	out := map[string]bool{}
-	collectSelectPaths(root, out)
+	collectSelectPaths(root, map[string]string{}, out)
 	return out, nil
 }
 
-func collectSelectPaths(e ast.Expr, out map[string]bool) {
-	if e.Kind() == ast.SelectKind {
-		if p, ok := celPath(e); ok && p != "" {
+// collectSelectPaths walks e under `env`, which maps comprehension variables
+// in scope to the path of the value they range over.
+func collectSelectPaths(e ast.Expr, env map[string]string, out map[string]bool) {
+	lookup := func(name string) (string, bool) { p, ok := env[name]; return p, ok }
+	record := func(x ast.Expr) {
+		if p, ok := celPath(x, lookup); ok && p != "" {
 			out[p] = true
 		}
 	}
 	switch e.Kind() {
 	case ast.SelectKind:
-		collectSelectPaths(e.AsSelect().Operand(), out)
+		record(e)
+	case ast.CallKind:
+		c := e.AsCall()
+		// Indexing yields a value whose type the plugin must supply.
+		if !c.IsMemberFunction() && c.FunctionName() == operators.Index && len(c.Args()) == 2 {
+			record(e)
+		}
+		// A comprehension binds its variable to the receiver's elements; walk
+		// the body with that binding so paths through it resolve.
+		if v, recv, body, ok := comprehension(c); ok {
+			collectSelectPaths(recv, env, out)
+			inner := env
+			if p, known := celPath(recv, lookup); known {
+				elem := IterElem(p)
+				out[elem] = true
+				inner = make(map[string]string, len(env)+1)
+				for k, val := range env {
+					inner[k] = val
+				}
+				inner[v] = elem
+			} else if _, shadowed := env[v]; shadowed {
+				inner = make(map[string]string, len(env))
+				for k, val := range env {
+					inner[k] = val
+				}
+				delete(inner, v)
+			}
+			for _, a := range body {
+				collectSelectPaths(a, inner, out)
+			}
+			return
+		}
+	}
+	switch e.Kind() {
+	case ast.SelectKind:
+		collectSelectPaths(e.AsSelect().Operand(), env, out)
 	case ast.CallKind:
 		c := e.AsCall()
 		if c.IsMemberFunction() {
-			collectSelectPaths(c.Target(), out)
+			collectSelectPaths(c.Target(), env, out)
 		}
 		for _, a := range c.Args() {
-			collectSelectPaths(a, out)
+			collectSelectPaths(a, env, out)
 		}
 	case ast.ListKind:
 		for _, el := range e.AsList().Elements() {
-			collectSelectPaths(el, out)
+			collectSelectPaths(el, env, out)
 		}
 	case ast.MapKind:
 		for _, entry := range e.AsMap().Entries() {
 			me := entry.AsMapEntry()
-			collectSelectPaths(me.Key(), out)
-			collectSelectPaths(me.Value(), out)
+			collectSelectPaths(me.Key(), env, out)
+			collectSelectPaths(me.Value(), env, out)
 		}
 	case ast.StructKind:
 		for _, f := range e.AsStruct().Fields() {
-			collectSelectPaths(f.AsStructField().Value(), out)
+			collectSelectPaths(f.AsStructField().Value(), env, out)
 		}
 	case ast.ComprehensionKind:
 		co := e.AsComprehension()
-		collectSelectPaths(co.IterRange(), out)
-		collectSelectPaths(co.AccuInit(), out)
-		collectSelectPaths(co.LoopCondition(), out)
-		collectSelectPaths(co.LoopStep(), out)
-		collectSelectPaths(co.Result(), out)
+		collectSelectPaths(co.IterRange(), env, out)
+		collectSelectPaths(co.AccuInit(), env, out)
+		collectSelectPaths(co.LoopCondition(), env, out)
+		collectSelectPaths(co.LoopStep(), env, out)
+		collectSelectPaths(co.Result(), env, out)
 	}
+}
+
+// comprehension recognizes the CEL macros that bind an iteration variable
+// (parsed as ordinary calls, since macro expansion is disabled), returning the
+// variable, the receiver it ranges over, and the sub-expressions in its scope.
+func comprehension(c ast.CallExpr) (v string, recv ast.Expr, body []ast.Expr, ok bool) {
+	if !c.IsMemberFunction() {
+		return "", nil, nil, false
+	}
+	switch c.FunctionName() {
+	case "all", "exists", "exists_one", "existsOne", "filter":
+		if len(c.Args()) != 2 {
+			return "", nil, nil, false
+		}
+	case "map":
+		if len(c.Args()) != 2 && len(c.Args()) != 3 {
+			return "", nil, nil, false
+		}
+	default:
+		return "", nil, nil, false
+	}
+	args := c.Args()
+	if args[0].Kind() != ast.IdentKind {
+		return "", nil, nil, false
+	}
+	return args[0].AsIdent(), c.Target(), args[1:], true
 }
