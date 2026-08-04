@@ -43,3 +43,11 @@ lean_test(
     srcs = ["RuntimeTest.lean"],
     deps = ["//lean:protovalidate_cel"],
 )
+
+# Hand-written mirror of the generator's ValidPred/checkPred/ofPred emission:
+# every elaboration assumption the Phase-6 scheme relies on, kept compiling.
+lean_test(
+    name = "pred_scheme_test",
+    srcs = ["PredSchemeTest.lean"],
+    deps = ["//lean:protovalidate_runtime"],
+)
