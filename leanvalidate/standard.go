@@ -710,8 +710,11 @@ func lowerString(r *validatepb.StringRules) ([]loweredRule, error) {
 			"!(this in ["+strings.Join(stringList(notIn), ", ")+"])")
 	}
 
-	const uuidPattern = "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
-	const tuuidPattern = "^[0-9a-fA-F]{32}$"
+	// Shared with the Cel.Format differential battery (Test/format_corpus.tsv
+	// carries protovalidate's conformance cases for these two patterns), so
+	// the rule lowering and what the battery checks cannot drift apart.
+	const uuidPattern = celtolean.UUIDPattern
+	const tuuidPattern = celtolean.TUUIDPattern
 	switch wk := r.GetWellKnown().(type) {
 	case nil:
 	case *validatepb.StringRules_Email:

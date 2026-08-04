@@ -44,6 +44,29 @@ lean_test(
     deps = ["//lean:protovalidate_cel"],
 )
 
+# Differential battery for Protovalidate.Cel.Format: upstream protovalidate's
+# own conformance expectations for the well-known string formats, rendered as
+# `#guard`s the Lean engine re-decides while elaborating the module. Compiling
+# the library *is* the test.
+genrule(
+    name = "format_corpus_lean",
+    srcs = ["format_corpus.tsv"],
+    outs = ["FormatCorpus.lean"],
+    cmd = "$(location //cmd/formatcorpus) $(location format_corpus.tsv) > $@",
+    tools = ["//cmd/formatcorpus"],
+)
+
+lean_library(
+    name = "format_corpus",
+    srcs = [":format_corpus_lean"],
+    deps = ["//lean:protovalidate_cel"],
+)
+
+build_test(
+    name = "format_corpus_test",
+    targets = [":format_corpus"],
+)
+
 # Hand-written mirror of the generator's ValidPred/checkPred/ofPred emission:
 # every elaboration assumption the Phase-6 scheme relies on, kept compiling.
 lean_test(

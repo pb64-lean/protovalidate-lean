@@ -5,6 +5,7 @@ go_library(
     srcs = [
         "domain.go",
         "exports.go",
+        "formatprobe.go",
         "functions.go",
         "lean.go",
         "regexcheck.go",
