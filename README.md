@@ -94,10 +94,11 @@ Lean directly):
   `IGNORE_IF_ZERO_VALUE` becomes a zero-escape disjunct
   (`{ x : String // x.isEmpty ∨ (x.isEmail) }`) with a fast path in validate.
 
-`string.pattern` regexes are validated with Go's RE2 at codegen time and
-decided at runtime by the pure-Lean engine in `Protovalidate.Cel.Regex` (a
-Pike-VM NFA: classes, Perl classes, anchors, alternation, bounded
-quantifiers; linear time, total). The `email/hostname/ip/uri/...` formats are
+`string.pattern` regexes are gated at codegen time against the runtime
+engine's own grammar (a Go port, plus RE2 validity) and `#guard`-checked at
+Lean compile time, then decided at runtime by the pure-Lean engine in
+`Protovalidate.Cel.Regex` (a Pike-VM NFA: classes, Perl classes, anchors,
+alternation, bounded quantifiers; linear time, total). The `email/hostname/ip/uri/...` formats are
 real implementations in `Protovalidate.Cel.Format` following protovalidate's
 grammars. `timestamp('...')`/`duration('...')` literals fold to
 `Cel.Timestamp.mk`/`Cel.Duration.mk` constants at codegen time, with RFC
@@ -178,16 +179,16 @@ layer will assemble `{ x : T // <emitted proposition> }` itself.
 | `==` `!=` | `=` `≠` | `↔` when an operand is itself propositional |
 | `<` `<=` `>` `>=` | `<` `≤` `>` `≥` | |
 | `e in c` | `e ∈ c` | list/array/map-key membership |
-| `+ - * / %` | `+ - * / %` | `+` on strings/bytes/lists via `Add` shims |
+| `+ - * / %` | `+ - * / %` | `+` on strings/bytes/lists via `Add` shims; int/uint ops carry `Cel.addOk`-style overflow guards (see below) |
 | `c ? p : true` | `c → p` | also `c ? p : false` → `c ∧ p`, `c ? true : p` → `c ∨ p` |
 | `c ? a : b` | `if c then a else b` | decidable `ite` |
 | `'lit'`, `b'lit'`, `123`, `1.5`, `null` | `"lit"`, `"lit".toUTF8`/`ByteArray.mk #[..]`, `123`, `1.5`, `none` | |
 | `[1, 2]` / `{'k': v}` | `#[1, 2]` / `Std.HashMap.ofList [("k", v)]` | repeated fields are `Array` |
-| `this` / `this.f` / `l[i]` | binder / `x.f` / `l[i]!` | binder auto-renamed on collision |
+| `this` / `this.f` / `l[i]` | binder / `x.f` / guarded `(l[i]?).get h` | binder auto-renamed on collision; indexing guarded by `isSome` (CEL errors out of range) |
 | `size(e)`, `e.size()` | `e.size` | `String.size`/`List.size` shims |
 | `contains` | `Cel.contains e a` | typeclass: substring vs element vs subslice |
 | `startsWith` `endsWith` | `.startsWith` `.endsWith` | + `ByteArray` shims |
-| `matches` | `Cel.regexMatch e r` | pure-Lean RE2-subset engine (`Cel.Regex`) |
+| `matches` | `Cel.regexMatch e r` | pure-Lean RE2-subset engine (`Cel.Regex`); literal patterns gated at generation time + `#guard`ed at Lean compile time |
 | `has(e.f)` | `e.f.isSome` | explicit-presence fields |
 | `l.all(v, p)` / `l.exists(v, p)` | `∀ v ∈ l, p` / `∃ v ∈ l, p` | |
 | `l.exists_one(v, p)` | `l.countP (fun v => p) = 1` | counts duplicates like CEL (not `∃!`) |
@@ -205,24 +206,51 @@ refinement after decoding.
 
 ### Semantic notes
 
+An erroring CEL rule is **not satisfied**; the translation encodes exactly
+that (error ⇒ the proposition is false), so the kernel can never prove a
+proposition whose CEL evaluation would have errored:
+
 - **Integer division/modulo agree exactly with CEL.** grpc-lean maps proto
   ints to fixed-width `Int32`/`Int64` etc., whose Lean `/`/`%` truncate toward
   zero exactly like CEL's Go semantics. (Unbounded `Int` would not have
   matched — it uses Euclidean conventions.)
-- **Overflow**: CEL errors at runtime on int overflow; Lean fixed-width
-  arithmetic wraps. Constraints on in-range values are unaffected.
+- **Overflow**: CEL integer arithmetic is 64-bit and errors on overflow.
+  Every translated `+`/`-`/`*`/unary `-` on error-capable types carries a
+  `Cel.addOk`/`subOk`/`mulOk`/`negOk` side-condition computing the exact
+  result in unbounded `Int`/`Nat` and demanding the CEL domain, discharged as
+  `if h : Cel.mulOk x 2 then … else False` — overflow falsifies the
+  proposition. `Int64`/`UInt64` guards are CEL-exact; `Int32`/`UInt32` guards
+  demand the 32-bit range (conservatively stricter than CEL's 64-bit
+  intermediates — sound, never accepting what CEL rejects); `Nat` size
+  arithmetic guards truncating subtraction. Constant arithmetic folds and
+  range-checks at generation time (an always-erroring rule is rejected);
+  concatenation and timestamp/duration arithmetic are total and unguarded.
+- **Indexing**: CEL errors on an out-of-range index or missing map key, so
+  `l[i]` / `m['k']` translate to `(l[i]?).get h` under a pending
+  `(l[i]?).isSome` guard rather than a panicking `l[i]!`. Guards discharge at
+  exactly the boundaries CEL's error absorption allows (`&&`/`||` operands,
+  ternary branches, `all`/`exists` bodies — in positive polarity); in
+  error-strict or negated contexts they float outward and close at the root,
+  so `!x[0] > 5` on an empty array is *false*, matching CEL's error. The few
+  shapes with no sound discharge point (index proofs inside
+  `exists_one`/`map`/`filter` bodies or negated quantifier bodies) are
+  source-located generation errors.
+- **Enums work as ints**: the plugin resolves every `this` path against the
+  descriptors, so enum-typed values (field rules, message-rule leaves,
+  repeated/map element rules) render through the generated enum's `.toInt32`
+  view, matching CEL's enum-as-int semantics. Standard enum rules keep their
+  constructor-test form. (Enum values reached through *indexing* — an
+  enum-valued `m['k']` compared to an int — still fail at Lean elaboration.)
+- **Map selection sugar works**: `this.labels.priority` becomes guarded key
+  indexing (missing key ⇒ false, CEL's error), and `has(this.labels.priority)`
+  becomes key presence — at any path depth.
 - Warnings (stderr / JSON) flag translations with caveats: `has()` presence
   semantics beyond `Option` fields, evaluation-time-dependent `now`,
-  placeholder timestamp/duration types, free identifiers kept verbatim.
-- Enum-typed fields: CEL treats enums as ints; generated Lean enums are
-  inductives, so integer comparisons on enum fields fail to elaborate until
-  descriptor-aware codegen maps them (`x.toInt` / variant names).
-- Map field *selection* sugar (`m.key` for `m['key']`) is emitted as a plain
-  field select and will not elaborate against `Std.HashMap`; use indexing.
-- `l[i]` becomes panicking-default `l[i]!` (CEL errors out of range; a total
-  proposition needs a value).
+  placeholder timestamp/duration types, free identifiers kept verbatim,
+  non-literal regex patterns.
 - `string(e)` uses `toString`, whose formatting may diverge from CEL's for
-  floats.
+  floats. Numeric literals wider than a 32-bit field's type still elaborate
+  by wrapping (a CEL type-checker would flag such rules).
 
 ## Codegen semantics and limitations
 
@@ -288,11 +316,17 @@ refinement after decoding.
   `lt_now`/`gt_now`/`within` are rejected (`Cel.now` is opaque — keep
   evaluation-time constraints outside the refinement).
 - The regex engine rejects unsupported RE2 constructs (`(?i)` flags, `\b`,
-  named classes) at parse time — such patterns match nothing at runtime; the
-  plugin pre-validates literal patterns with Go's RE2, which accepts a
-  superset, so exotic patterns can pass codegen and still match nothing.
-  `validate` reports the first violation (fieldPath, ruleId, message);
-  `toBase` drops unknown fields.
+  named classes) at parse time — such patterns would match nothing at
+  runtime, which would be unsound under negation. Two layers prevent that
+  for literal patterns: the generator gates every literal pattern through a
+  Go port of the Lean engine's grammar (`celtolean.RegexAccepted`, stricter
+  where RE2 and the engine would silently diverge: POSIX classes, octal
+  escapes) with a source-located error, and every generated file carries a
+  compile-time `#guard Cel.Regex.accepts "..."` per pattern, so a
+  gate/engine disagreement fails the Lean build. Only *dynamic* patterns
+  (`this.matches(this.other)`) can still reach the match-nothing fallback —
+  flagged with a warning. `validate` reports the first violation (fieldPath,
+  ruleId, message); `toBase` drops unknown fields.
 
 ## Layout
 
@@ -329,3 +363,9 @@ non-generated, option-only proto dependencies such as
 2. Predefined (user-extension) rules; `(?i)` and `\b` in the regex engine;
    now-dependent rules (`timestamp.lt_now`/`within`), which need a
    validation-time story for `Cel.now`.
+3. Residual conservative spots (sound, but stricter than CEL or late-failing):
+   32-bit arithmetic guards demand the 32-bit range; error absorption under
+   negation (`!(err && false)`) translates to failure; out-of-range literals
+   against 32-bit fields wrap at elaboration; enum values reached through
+   indexing lack the `.toInt32` view. Descriptor-aware literal range checks
+   would close the last two.
