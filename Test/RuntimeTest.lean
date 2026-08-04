@@ -114,14 +114,20 @@ def main : IO Unit := do
 
   -- hostnames / emails
   ck "hostname" "example.com".isHostname true
-  ck "hostname trailing dot" "example.com.".isHostname false
+  -- One trailing dot is the DNS root and is accepted; two are not.
+  ck "hostname trailing dot" "example.com.".isHostname true
+  ck "hostname double trailing dot" "example.com..".isHostname false
   ck "hostname hyphens" "-bad.com".isHostname false
   ck "hostname numeric tld" "abc.123".isHostname false
   ck "email" "simple@example.com".isEmail true
   ck "email plus" "x+y_z@sub.example.com".isEmail true
   ck "email no at" "no-at-sign".isEmail false
-  ck "email dot lead" ".lead@example.com".isEmail false
+  -- protovalidate's email grammar is the HTML standard's, not RFC 5322's:
+  -- dots are ordinary local-part characters and a numeric TLD is fine.
+  ck "email dot lead" ".lead@example.com".isEmail true
+  ck "email numeric tld" "a@0.1.2.3".isEmail true
   ck "email bad domain" "a@-bad.com".isEmail false
+  ck "email two ats" "a@b@example.com".isEmail false
 
   -- ips / prefixes / host-and-port
   ck "ipv4" ("192.168.0.1".isIp 4) true
@@ -130,20 +136,35 @@ def main : IO Unit := do
   ck "ipv6 v4 tail" ("::ffff:192.168.0.1".isIp 6) true
   ck "ipv6 double comp" ("1::2::3".isIp 6) false
   ck "ip any" ("::1".isIp) true
+  -- RFC 4007 zone identifiers: any non-empty suffix after '%'.
+  ck "ipv6 zone id" ("fe80::1%en0".isIp 6) true
+  ck "ipv6 empty zone id" ("fe80::1%".isIp 6) false
   ck "prefix strict ok" ("192.168.0.0/24".isIpPrefix 4 true) true
   ck "prefix strict host bits" ("192.168.0.1/24".isIpPrefix 4 true) false
   ck "prefix loose" ("192.168.0.1/24".isIpPrefix 4 false) true
   ck "prefix len over" ("10.0.0.0/33".isIpPrefix 4 false) false
+  -- A prefix admits no zone identifier.
+  ck "prefix zone id" ("fe80::1%en0/64".isIpPrefix 6 false) false
   ck "hostport" ("example.com:8080".isHostAndPort true) true
   ck "hostport required" ("example.com".isHostAndPort true) false
   ck "hostport v6" ("[::1]:80".isHostAndPort true) true
+  ck "hostport v6 zone" ("[::1%en0]:80".isHostAndPort true) true
   ck "hostport big port" ("example.com:99999".isHostAndPort true) false
+  -- Separators are found from the right: the zone eats the inner ']'.
+  ck "hostport v6 zone bracket" ("[::0%00]]".isHostAndPort false) true
 
   -- uris
   ck "uri" "https://example.com/path?q=1#frag".isUri true
   ck "uri urn" "urn:isbn:0451450523".isUri true
   ck "uri relative not abs" "//host/path".isUri false
   ck "uri bad pct" "https://example.com/%zz".isUri false
+  -- IP-literal alternatives: IPvFuture and RFC 6874 zone identifiers.
+  ck "uri ipvfuture" "https://[v7.host:x]".isUri true
+  ck "uri ipv6 zone" "https://[::1%25eth0]".isUri true
+  ck "uri ipv6 bare zone" "https://[::1%eth0]".isUri false
+  -- Percent-encoding in a host must spell a UTF-8 sequence.
+  ck "uri host pct utf8" "https://foo%c3%96".isUri true
+  ck "uri host pct bad utf8" "https://foo%c3x%96".isUri false
   ck "uriref relative" "./relative/path".isUriRef true
   ck "uriref frag" "#frag".isUriRef true
   ck "uriref space" "a b".isUriRef false

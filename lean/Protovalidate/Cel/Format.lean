@@ -19,11 +19,15 @@ def isHostnameLabel (label : String) : Bool :=
     !label.startsWith "-" && !label.endsWith "-"
 
 /-- Hostname: ≤253 chars, dot-separated labels of ≤63 alphanumeric/hyphen
-chars without leading/trailing hyphens, no trailing dot, and a non-numeric
-final label. -/
+chars without leading/trailing hyphens, a single optional trailing dot (the
+DNS root), and a non-numeric right-most label.
+
+The length bound counts the trailing dot, matching protovalidate (whose prose
+says "excluding the optional trailing dot" but whose check does not). -/
 def isHostname (s : String) : Bool :=
-  !s.isEmpty && s.length ≤ 253 &&
-    let labels := s.splitOn "."
+  s.length ≤ 253 &&
+    let str := if s.endsWith "." then (s.dropEnd 1).toString else s
+    let labels := str.splitOn "."
     labels.all isHostnameLabel &&
       match labels.getLast? with
       | some last => !last.toList.all Char.isDigit
@@ -96,7 +100,25 @@ def ipv6Value? (s : String) : Option Nat := do
     else some (joined ls * 2 ^ (16 * (8 - ls.length)) + joined rs)
   | _ => none
 
-def isIpv6 (s : String) : Bool := (ipv6Value? s).isSome
+/-- IPv6 in RFC 4291 text form, *without* a zone identifier. This is the form
+an address prefix and a URI IP-literal admit. -/
+def isIpv6Addr (s : String) : Bool := (ipv6Value? s).isSome
+
+/-- Strip an optional RFC 4007 zone identifier (`fe80::1%en0`). protovalidate
+permits any non-empty zone string; a `%` with nothing after it is invalid, and
+so is a `%` inside what would otherwise be the address (the zone runs to the
+end of the string). -/
+def stripZoneId (s : String) : Option String :=
+  match s.toList.findIdx? (· == '%') with
+  | none => some s
+  | some i => if i + 1 < s.length then some (String.ofList (s.toList.take i)) else none
+
+/-- IPv6 as CEL's `isIp(…, 6)` accepts it: RFC 4291 text form with an optional
+RFC 4007 zone identifier. -/
+def isIpv6 (s : String) : Bool :=
+  match stripZoneId s with
+  | none => false
+  | some addr => isIpv6Addr addr
 
 def isIp (s : String) (version : Int := 0) : Bool :=
   if version == 4 then isIpv4 s
@@ -128,26 +150,37 @@ def isIpPrefix (s : String) (version : Int := 0) (strict : Bool := false) : Bool
       | _ => false
   | _ => false
 
-/-! ## Email (RFC 5322 addr-spec, dot-atom form only) -/
+/-! ## Email (HTML living standard, as protovalidate defines it) -/
 
-def isAtext (c : Char) : Bool :=
+/-- Local-part character. protovalidate follows the HTML standard's email
+definition, which willfully deviates from RFC 5322: the local part is
+`[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+`, so `.` is an ordinary character (leading,
+trailing and repeated dots are all accepted), there is no quoted form, and
+there is no length limit on either part or on the address as a whole. -/
+def isEmailLocalChar (c : Char) : Bool :=
   c.isAlphanum ||
-    c == '!' || c == '#' || c == '$' || c == '%' || c == '&' || c == '\'' ||
-    c == '*' || c == '+' || c == '-' || c == '/' || c == '=' || c == '?' ||
-    c == '^' || c == '_' || c == '`' || c == '{' || c == '|' || c == '}' ||
-    c == '~'
+    c == '.' || c == '!' || c == '#' || c == '$' || c == '%' || c == '&' ||
+    c == '\'' || c == '*' || c == '+' || c == '-' || c == '/' || c == '=' ||
+    c == '?' || c == '^' || c == '_' || c == '`' || c == '{' || c == '|' ||
+    c == '}' || c == '~'
 
-def isDotAtom (s : String) : Bool :=
-  let atoms := s.splitOn "."
-  !s.isEmpty && atoms.all (fun a => !a.isEmpty && a.toList.all isAtext)
+/-- Domain label of an email address: 1–63 alphanumerics and hyphens starting
+and ending with an alphanumeric. Unlike `isHostname`'s labels there is no
+trailing-dot form and an all-digit right-most label is allowed. -/
+def isEmailDomainLabel (label : String) : Bool :=
+  let cs := label.toList
+  1 ≤ cs.length && cs.length ≤ 63 &&
+    cs.all (fun c => c.isAlphanum || c == '-') &&
+    cs.head?.elim false Char.isAlphanum &&
+    cs.getLast?.elim false Char.isAlphanum
 
-/-- Email: `local@domain` with a dot-atom local part (≤64 chars, no quoting)
-and a hostname domain; ≤254 chars overall. -/
+/-- Email: `local@domain`, exactly one `@` (it is in neither character set). -/
 def isEmail (s : String) : Bool :=
-  s.length ≤ 254 &&
-    match s.splitOn "@" with
-    | [localPart, domain] => localPart.length ≤ 64 && isDotAtom localPart && isHostname domain
-    | _ => false
+  match s.splitOn "@" with
+  | [localPart, domain] =>
+    !localPart.isEmpty && localPart.toList.all isEmailLocalChar &&
+      (domain.splitOn ".").all isEmailDomainLabel
+  | _ => false
 
 /-! ## Host and port -/
 
@@ -156,21 +189,36 @@ def isPort (s : String) : Bool :=
   !cs.isEmpty && cs.all Char.isDigit && (cs.length == 1 || cs.head? != some '0') &&
     cs.foldl (fun acc c => acc * 10 + (c.toNat - 48)) 0 ≤ 65535
 
-/-- `host[:port]` where host is a hostname, IPv4, or bracketed IPv6. -/
+/-- Code-point index of the last occurrence of `c` in `s`. -/
+def lastIndexOf? (s : String) (c : Char) : Option Nat :=
+  let cs := s.toList
+  (cs.reverse.findIdx? (· == c)).map (fun i => cs.length - 1 - i)
+
+/-- `host[:port]` where host is a hostname, IPv4, or bracketed IPv6.
+
+Both separators are located from the *right*, as protovalidate does: the
+bracketed form ends at the last `]` and the port begins at the last `:`. That
+is observable — in `[::0%00]]` the zone identifier swallows the first `]`. -/
 def isHostAndPort (s : String) (portRequired : Bool) : Bool :=
-  if s.startsWith "[" then
-    match s.splitOn "]" with
-    | [inner, rest] =>
-      let ip := (inner.drop 1).toString
-      isIpv6 ip &&
-        (rest.isEmpty && !portRequired ||
-          rest.startsWith ":" && isPort (rest.drop 1).toString)
-    | _ => false
+  if s.isEmpty then false
   else
-    match s.splitOn ":" with
-    | [host] => !portRequired && (isHostname host || isIpv4 host)
-    | [host, port] => (isHostname host || isIpv4 host) && isPort port
-    | _ => false
+    let cs := s.toList
+    let colon? := lastIndexOf? s ':'
+    if s.startsWith "[" then
+      match lastIndexOf? s ']' with
+      | none => false
+      | some e =>
+        let inner := String.ofList ((cs.take e).drop 1)
+        if e + 1 == cs.length then !portRequired && isIpv6 inner
+        else if colon? == some (e + 1) then
+          isIpv6 inner && isPort (String.ofList (cs.drop (e + 2)))
+        else false
+    else
+      match colon? with
+      | none => !portRequired && (isHostname s || isIpv4 s)
+      | some i =>
+        let host := String.ofList (cs.take i)
+        (isHostname host || isIpv4 host) && isPort (String.ofList (cs.drop (i + 1)))
 
 /-! ## URIs (RFC 3986) -/
 
@@ -194,6 +242,57 @@ def pctOk (ok : Char → Bool) : List Char → Bool
 
 def isPchar (c : Char) : Bool := isUnreserved c || isSubDelim c || c == ':' || c == '@'
 
+/-! ### Percent-encoded hosts must encode UTF-8
+
+RFC 3986: "URI producing applications must not use percent-encoding in host
+unless it is used to represent a UTF-8 character sequence." protovalidate
+enforces this, so `foo%c3x%96` (a truncated two-byte sequence) is not a valid
+host even though every triple is syntactically well-formed. -/
+
+def hexValue (c : Char) : Nat :=
+  if c.isDigit then c.toNat - 48
+  else if 'a' ≤ c && c ≤ 'f' then c.toNat - 87
+  else if 'A' ≤ c && c ≤ 'F' then c.toNat - 55
+  else 0
+
+/-- Percent-decode to bytes. Non-`%` characters are ASCII here (everything else
+is rejected by the host character classes), so a code point is a byte. -/
+def pctDecode : List Char → List UInt8
+  | [] => []
+  | '%' :: h1 :: h2 :: rest => (hexValue h1 * 16 + hexValue h2).toUInt8 :: pctDecode rest
+  | c :: rest => c.toNat.toUInt8 :: pctDecode rest
+
+/-- UTF-8 continuation byte. -/
+def isCont (b : UInt8) : Bool := 0x80 ≤ b && b ≤ 0xbf
+
+/-- Well-formed UTF-8 (RFC 3629): no overlong encodings, no surrogates,
+nothing above U+10FFFF — what Go's `utf8.Valid` accepts. -/
+def utf8Valid : List UInt8 → Bool
+  | [] => true
+  | b0 :: rest =>
+    if b0 ≤ 0x7f then utf8Valid rest
+    else if 0xc2 ≤ b0 && b0 ≤ 0xdf then
+      match rest with
+      | b1 :: rest' => isCont b1 && utf8Valid rest'
+      | [] => false
+    else if 0xe0 ≤ b0 && b0 ≤ 0xef then
+      match rest with
+      | b1 :: b2 :: rest' =>
+        -- E0 excludes overlongs (A0..BF), ED excludes surrogates (80..9F).
+        let lo : UInt8 := if b0 == 0xe0 then 0xa0 else 0x80
+        let hi : UInt8 := if b0 == 0xed then 0x9f else 0xbf
+        lo ≤ b1 && b1 ≤ hi && isCont b2 && utf8Valid rest'
+      | _ => false
+    else if 0xf0 ≤ b0 && b0 ≤ 0xf4 then
+      match rest with
+      | b1 :: b2 :: b3 :: rest' =>
+        -- F0 excludes overlongs (90..BF), F4 caps at U+10FFFF (80..8F).
+        let lo : UInt8 := if b0 == 0xf0 then 0x90 else 0x80
+        let hi : UInt8 := if b0 == 0xf4 then 0x8f else 0xbf
+        lo ≤ b1 && b1 ≤ hi && isCont b2 && isCont b3 && utf8Valid rest'
+      | _ => false
+    else false
+
 def isSchemeOk (s : String) : Bool :=
   match s.toList with
   | [] => false
@@ -202,14 +301,43 @@ def isSchemeOk (s : String) : Bool :=
 def isUserinfoOk (s : String) : Bool :=
   pctOk (fun c => isUnreserved c || isSubDelim c || c == ':') s.toList
 
+/-- `IPvFuture = "v" 1*HEXDIG "." 1*( unreserved / sub-delims / ":" )`. -/
+def isIpvFuture (s : String) : Bool :=
+  match s.toList with
+  | 'v' :: rest =>
+    let hex := rest.takeWhile isHexDigit
+    match rest.dropWhile isHexDigit with
+    | '.' :: body =>
+      !hex.isEmpty && !body.isEmpty &&
+        body.all (fun c => isUnreserved c || isSubDelim c || c == ':')
+    | _ => false
+  | _ => false
+
+/-- `ZoneID = 1*( unreserved / pct-encoded )` (RFC 6874). -/
+def isZoneId (s : String) : Bool := !s.isEmpty && pctOk isUnreserved s.toList
+
+/-- `IPv6addrz = IPv6address "%25" ZoneID` (RFC 6874). Inside a URI the zone
+separator is percent-encoded, unlike the bare `%` `isIp` accepts; the address
+part holds no `%`, so the first one starts the zone. -/
+def isIpv6Addrz (s : String) : Bool :=
+  let cs := s.toList
+  match cs.findIdx? (· == '%') with
+  | none => false
+  | some i =>
+    match cs.drop i with
+    | '%' :: '2' :: '5' :: zone =>
+      isIpv6Addr (String.ofList (cs.take i)) && isZoneId (String.ofList zone)
+    | _ => false
+
 /-- reg-name / IP-literal / IPv4 host of an authority. -/
 def isUriHost (s : String) : Bool :=
-  if s.startsWith "[" && s.endsWith "]" then
-    let inner := ((s.drop 1).toString.dropEnd 1).toString
-    -- IP-literal: IPv6 (or IPvFuture, which we do not support).
-    isIpv6 inner
-  else
-    pctOk (fun c => isUnreserved c || isSubDelim c) s.toList
+  (if s.startsWith "[" && s.endsWith "]" then
+      -- IP-literal = "[" ( IPv6address / IPv6addrz / IPvFuture ) "]"
+      let inner := ((s.drop 1).toString.dropEnd 1).toString
+      isIpv6Addr inner || isIpv6Addrz inner || isIpvFuture inner
+    else
+      pctOk (fun c => isUnreserved c || isSubDelim c) s.toList) &&
+    (!s.toList.contains '%' || utf8Valid (pctDecode s.toList))
 
 def isAuthorityOk (s : String) : Bool :=
   -- userinfo@ split at the LAST '@' (userinfo may contain none, host cannot
