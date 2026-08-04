@@ -161,10 +161,13 @@ error ⇒ fail). Types whose CEL arithmetic cannot error (floats, string/bytes/
 list concatenation, timestamp/duration in this model) use the default `true`
 conditions.
 
-For `Int32`/`UInt32` fields the guard demands the result fits the *32-bit*
-type: CEL itself computes in 64 bits, so this is conservatively stricter (an
-intermediate in `(2^31, 2^63)` fails here but not in CEL) — sound, never
-accepting a value CEL rejects. `Nat` (the type of `size()` results) cannot
+The `Int32`/`UInt32` instances demand the result fits the *32-bit* type, which
+is conservatively stricter than CEL (an intermediate in `(2^31, 2^63)` fails
+here but not in CEL) — sound, never accepting a value CEL rejects. They are
+only reached where the generator could *not* resolve the operand's proto type
+(comprehension binders, indexed elements): when it can, it lifts the operand
+to CEL's own width first (`x.toInt64`), so the guard picks the `Int64`/`UInt64`
+instance below and is CEL-exact. `Nat` (the type of `size()` results) cannot
 overflow in Lean, but its subtraction truncates at zero where CEL goes
 negative, hence `subOk := b ≤ a`. Division and modulo are unguarded: their
 Lean semantics on the fixed-width types already agree with CEL in-range. -/

@@ -94,8 +94,27 @@ it while reporting the first violation in protovalidate rule order — and
 conjuncts over the *input* base value (`(M.validate_sound h).items_elems`),
 which downstream code can project and rewrite along without re-running any
 checks. `Test/PredSchemeTest.lean` keeps a hand-written mirror of the emission
-scheme compiling, and the example's `lean_assurance_test` audits the generated
-theorems' axiom closure (no `sorryAx`, standard axioms only) at compile time.
+scheme compiling.
+
+Three `lean_assurance_test` targets audit axiom closures at compile time (no
+`sorryAx`, standard axioms only), covering both the instances and the scheme
+they instantiate:
+
+| target | principal theorems |
+|---|---|
+| `//lean:runtime_assurance` | the generic `Decision` lemmas (`pred_of_toExcept_ok`, `toExcept_isOk`, `decodeThenValidate_sound`), the presence plumbing, `size_mapArray` — plus a scan of the whole `Protovalidate.Cel`/`Runtime` surface the generated propositions are stated over |
+| `//examples/shipping:shipping_valid_assurance` | `shipping.v1.Valid.{Order,Item,Order.payer_Type}` soundness/completeness/decode |
+| `//examples/shipping:inventory_valid_assurance` | `catalog.v1.Valid.{Product,Payment,Payment.method_Type}` (standard rules, enums, element rules, validated oneof) |
+
+A repeated-message field's own rules are stated over the *validated* array
+(`Protovalidate.mapArray b.f Elem.ofPred h.f_elems`), because those rules may
+mention the element type's refinements. `Protovalidate.size_mapArray` moves
+the structural ones back to `b.f` (`(mapArray …).size = xs.size`); it is a
+propositional rewrite, not a definitional one, which is why the conjunct is
+not phrased over `b.f` directly. `toBase` is likewise not a left inverse of
+`ofPred` — it drops the base value's unknown wire fields — so message rules
+traversing a validated field cannot be restated over the base value at all
+(`Test/PredSchemeTest.lean` witnesses both facts).
 
 ### Standard rules
 
@@ -127,8 +146,11 @@ Lean directly):
   (`{ x : String // x.isEmpty ∨ (x.isEmail) }`) with a fast path in validate.
 
 `string.pattern` regexes are gated at codegen time against the runtime
-engine's own grammar (a Go port, plus RE2 validity) and `#guard`-checked at
-Lean compile time, then decided at runtime by the pure-Lean engine in
+engine's own grammar (a Go port, plus RE2 validity), then `#guard`-checked at
+Lean compile time — both for acceptance and against a per-pattern battery of
+RE2-labelled probe strings (see
+[regex assurance](#regex-assurance-what-the-guards-do-and-do-not-say)) — and
+decided at runtime by the pure-Lean engine in
 `Protovalidate.Cel.Regex` (a Pike-VM NFA: classes, Perl classes, anchors,
 alternation, bounded quantifiers; linear time, total). The `email/hostname/ip/uri/...` formats are
 real implementations in `Protovalidate.Cel.Format` following protovalidate's
@@ -251,12 +273,37 @@ proposition whose CEL evaluation would have errored:
   `Cel.addOk`/`subOk`/`mulOk`/`negOk` side-condition computing the exact
   result in unbounded `Int`/`Nat` and demanding the CEL domain, discharged as
   `if h : Cel.mulOk x 2 then … else False` — overflow falsifies the
-  proposition. `Int64`/`UInt64` guards are CEL-exact; `Int32`/`UInt32` guards
-  demand the 32-bit range (conservatively stricter than CEL's 64-bit
-  intermediates — sound, never accepting what CEL rejects); `Nat` size
-  arithmetic guards truncating subtraction. Constant arithmetic folds and
-  range-checks at generation time (an always-erroring rule is rejected);
-  concatenation and timestamp/duration arithmetic are total and unguarded.
+  proposition. Where the plugin resolves the operand's proto type (see
+  *descriptor-aware numerics* below) the arithmetic is **lifted to CEL's own
+  width** first — an `int32` field's `this * 100` emits `x.toInt64 * 100`
+  under `Cel.mulOk x.toInt64 100` — so the guard is exactly CEL's condition
+  and an intermediate outside the 32-bit range is not an overflow, matching
+  CEL. Division and modulo widen too (fixing `int32Min / -1`, which wraps in
+  `Int32` but not in CEL). Without that typing (values bound by a
+  comprehension variable, elements reached through indexing) the guard falls
+  back to the operand's own Lean type, so `Int32`/`UInt32` operands demand the
+  32-bit range — conservatively stricter than CEL, sound but not exact.
+  `Nat` size arithmetic guards truncating subtraction. Constant arithmetic
+  folds and range-checks at generation time (an always-erroring rule is
+  rejected); concatenation and timestamp/duration arithmetic are total and
+  unguarded.
+- **Descriptor-aware numerics**: Lean silently wraps an out-of-range literal
+  (`(3000000000 : Int32)` elaborates to `-1294967296`), so the plugin
+  range-checks every numeric literal against the domain of the proto value it
+  meets and **rejects the rule at generation time** with a source-located
+  error naming the field's Lean type and bounds. This covers `this` in a
+  scalar field rule, `this`-rooted select paths in message rules (including
+  map-selection leaves and enum ints, which CEL compares as `int32`), and
+  custom CEL on `repeated.items`/`map.keys`/`map.values` elements; it also
+  rejects negative literals against unsigned fields and `double` literals
+  outside `Float32`'s finite range on a `float` field. Literals meeting a
+  *widened* arithmetic result are checked at 64-bit width instead, so
+  `this * 10000 <= 5000000000` on an `int32` field is accepted — the product
+  is `Int64`. The same typing makes mixed-width comparisons elaborate
+  (`this.small < this.big` across `int32`/`int64` widens the narrower side).
+  Values with no resolvable proto type — comprehension binders
+  (`this.all(v, v > 3000000000)`), indexed elements, free identifiers — are
+  *not* checked and can still wrap.
 - **Indexing**: CEL errors on an out-of-range index or missing map key, so
   `l[i]` / `m['k']` translate to `(l[i]?).get h` under a pending
   `(l[i]?).isSome` guard rather than a panicking `l[i]!`. Guards discharge at
@@ -281,8 +328,9 @@ proposition whose CEL evaluation would have errored:
   placeholder timestamp/duration types, free identifiers kept verbatim,
   non-literal regex patterns.
 - `string(e)` uses `toString`, whose formatting may diverge from CEL's for
-  floats. Numeric literals wider than a 32-bit field's type still elaborate
-  by wrapping (a CEL type-checker would flag such rules).
+  floats. `float` fields compare at `Float32` precision where CEL compares at
+  double precision, so a `double` literal that is not exactly representable in
+  `Float32` rounds (its *magnitude* is range-checked, its precision is not).
 
 ## Codegen semantics and limitations
 
@@ -349,16 +397,60 @@ proposition whose CEL evaluation would have errored:
   evaluation-time constraints outside the refinement).
 - The regex engine rejects unsupported RE2 constructs (`(?i)` flags, `\b`,
   named classes) at parse time — such patterns would match nothing at
-  runtime, which would be unsound under negation. Two layers prevent that
-  for literal patterns: the generator gates every literal pattern through a
-  Go port of the Lean engine's grammar (`celtolean.RegexAccepted`, stricter
-  where RE2 and the engine would silently diverge: POSIX classes, octal
-  escapes) with a source-located error, and every generated file carries a
-  compile-time `#guard Cel.Regex.accepts "..."` per pattern, so a
-  gate/engine disagreement fails the Lean build. Only *dynamic* patterns
-  (`this.matches(this.other)`) can still reach the match-nothing fallback —
-  flagged with a warning. `validate` reports the first violation (fieldPath,
-  ruleId, message); `toBase` drops unknown fields.
+  runtime, which would be unsound under negation. See
+  [regex assurance](#regex-assurance-what-the-guards-do-and-do-not-say) for
+  the layers that prevent it and their exact scope. `validate` reports the
+  first violation (fieldPath, ruleId, message); `toBase` drops unknown
+  fields.
+- A field's rules are decided as one dependent-`if` chain drawing hypothesis
+  names from a fixed 64-name pool; a field carrying more than 64 rules is a
+  generation-time error rather than Lean with a captured binder.
+
+### Regex assurance: what the guards do and do not say
+
+`string.pattern` and CEL `matches` are decided at runtime by
+`Protovalidate.Cel.Regex`, a pure-Lean Pike VM. It is *trusted code*: no
+theorem relates it to a mathematical semantics of regular expressions. What
+protects it is a generation-time gate plus two compile-time batteries, and it
+is worth being exact about their reach.
+
+**Enforced.** For every *literal* pattern:
+
+1. `celtolean.RegexAccepted` (a hand-written Go port of the Lean engine's
+   grammar) must accept it, and Go's RE2 (`regexp.Compile`) must accept it —
+   a source-located generation error otherwise. The port is deliberately
+   *stricter* where RE2 and the Lean parser would silently diverge (POSIX
+   named classes, octal escapes, `[]-a]`).
+2. The generated Lean file carries `#guard Cel.Regex.accepts "<pattern>"`.
+   Lean evaluates it while elaborating the module, so if the Go gate accepted
+   a pattern the Lean parser rejects, the build fails. This is what rules out
+   the match-nothing fallback (and with it the unsoundness of
+   `!this.matches(p)` degenerating to `true`).
+3. A **differential battery** per pattern: probe strings walked out of the
+   pattern's own RE2 syntax tree (both alternation branches, minimum and one
+   extra repetition, class representatives) plus perturbations, each labelled
+   by Go's RE2 engine — the reference `matches` semantics — and emitted as
+   `#guard Cel.regexMatch "<probe>" "<pattern>"` /
+   `#guard !(Cel.regexMatch …)`. Lean re-decides every one at elaboration
+   time, so a *language-level* disagreement between RE2 and the Lean engine on
+   an emitted probe fails the build. Up to 10 probes per pattern; the same
+   batteries are emitted for the `Test/cel_corpus.tsv` rows.
+
+**Not enforced — do not read more into the guards than this.**
+
+- The batteries are **differential testing, not equivalence**: agreement on
+  finitely many probe strings does not prove `Cel.Regex` and RE2 accept the
+  same language for that pattern, let alone in general. There is no
+  equivalence theorem and none is claimed; the Go side is not formalized.
+- `#guard` is *kernel evaluation of a closed Bool*, not a proof carried in any
+  theorem's axiom closure. A generated `validate_sound` does not depend on it.
+- Nothing above applies to *dynamic* patterns (`this.matches(this.other)`):
+  they are unreachable at generation time, still fall back to matching nothing
+  when unsupported, and are flagged with a warning.
+- The Go gate being stricter than the Lean parser is unchecked (and harmless:
+  it only rejects patterns the engine could have handled). Only the other
+  direction — Go accepts, Lean rejects — is unsound, and that is exactly what
+  guard 2 catches.
 
 ## Layout
 
@@ -395,9 +487,19 @@ non-generated, option-only proto dependencies such as
 2. Predefined (user-extension) rules; `(?i)` and `\b` in the regex engine;
    now-dependent rules (`timestamp.lt_now`/`within`), which need a
    validation-time story for `Cel.now`.
-3. Residual conservative spots (sound, but stricter than CEL or late-failing):
-   32-bit arithmetic guards demand the 32-bit range; error absorption under
-   negation (`!(err && false)`) translates to failure; out-of-range literals
-   against 32-bit fields wrap at elaboration; enum values reached through
-   indexing lack the `.toInt32` view. Descriptor-aware literal range checks
-   would close the last two.
+3. Residual conservative spots (sound, but stricter than CEL or late-failing).
+   Descriptor-aware numerics closed the literal-wrapping hole and made
+   arithmetic guards CEL-exact wherever a rule's `this`-rooted path resolves
+   to a proto field; what is left is where no such path exists:
+   - values bound by a comprehension variable (`this.all(v, v * 2 > 0)`) or
+     reached through indexing (`this.items[0].qty`) carry no descriptor type,
+     so their literals are unchecked and their 32-bit guards stay
+     conservative — and enum values reached through indexing still lack the
+     `.toInt32` view;
+   - error absorption under negation (`!(err && false)`) translates to
+     failure;
+   - `float` fields compare at `Float32` precision, CEL at double precision.
+4. No formal relation between `Protovalidate.Cel.Regex` and RE2 beyond the
+   per-pattern differential batteries (see
+   [regex assurance](#regex-assurance-what-the-guards-do-and-do-not-say)), and
+   none between `Cel.Format`'s grammars and their RFCs.
