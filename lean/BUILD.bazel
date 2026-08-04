@@ -53,6 +53,9 @@ lean_assurance_test(
         "Protovalidate.someHolds_none",
         "Protovalidate.someHolds_self",
         "Protovalidate.not_isSome_none",
+        # The bridge from a repeated field's validated array back to the base
+        # array (structural rules stated over the former).
+        "Protovalidate.size_mapArray",
     ],
     deps = [
         ":protovalidate_cel",

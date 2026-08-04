@@ -357,6 +357,23 @@ example {b : BOrder} {v : Valid.Order} (h : Valid.Order.validate b = .ok v) :
     ∀ x, b.owner = some x → x.length ≥ 2 :=
   (Valid.Order.validate_sound h).owner
 
+-- A repeated-message field's own rules are stated over the *validated* array
+-- (they may mention the element refinements), but structural ones transport to
+-- the base array with `size_mapArray` — the reason the conjunct is not phrased
+-- over `b.items` in the first place is that the two are only propositionally,
+-- not definitionally, equal.
+example {b : BOrder} {v : Valid.Order} (h : Valid.Order.validate b = .ok v) :
+    b.items.size > 0 := by
+  have hp := (Valid.Order.validate_sound h).items
+  rwa [Protovalidate.size_mapArray] at hp
+
+-- toBase is *not* a left inverse of ofPred: it drops the fields the base type
+-- carries outside the validated projection (unknown wire fields in real
+-- generated code, `unknownStub` here). That is why message rules traversing a
+-- validated field cannot be restated over the base value either.
+example (b : BItem) (h : Valid.Item.ValidPred b) :
+    Valid.Item.toBase (Valid.Item.ofPred b h) = { b with unknownStub := 0 } := rfl
+
 /-! ### Runtime assertions -/
 
 def expect (cond : Bool) (msg : String) : IO Unit := do

@@ -147,6 +147,21 @@ def mapArray {α} {β : Type u} {p : α → Prop} (xs : Array α) (mk : (x : α)
     (hp : ∀ x, x ∈ xs → p x) : Array β :=
   xs.attach.map fun ⟨x, hx⟩ => mk x (hp x hx)
 
+/-- `mapArray` preserves length: validating a repeated field's elements neither
+drops nor duplicates any.
+
+A generated `ValidPred` states a repeated-message field's *own* rules over the
+validated array (`mapArray b.f Elem.ofPred h.f_elems`), because those rules may
+mention the element type's refinements. This is the bridge back to the base
+array for the structural ones: `(validate_sound h).f : (mapArray …).size > 0`
+rewrites to `b.f.size > 0` with `size_mapArray`. It is a propositional
+rewrite, not a definitional one — `Array.map` is not length-transparent for a
+variable array — which is why the conjunct is not phrased over `b.f` directly. -/
+@[simp] theorem size_mapArray {α} {β : Type u} {p : α → Prop} (xs : Array α)
+    (mk : (x : α) → p x → β) (hp : ∀ x, x ∈ xs → p x) :
+    (mapArray xs mk hp).size = xs.size := by
+  simp [mapArray]
+
 /-- Decide `p` for every element of a list, reporting the first failure. -/
 def checkList {α} {p : α → Prop} (check : (x : α) → Decision (p x)) :
     (l : List α) → Decision (∀ x, x ∈ l → p x)
