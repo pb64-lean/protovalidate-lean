@@ -10,6 +10,27 @@ types carry the constraints, and `toBase` forgets them again.
 
 open shipping.v1
 
+/-!
+The generated theorems are usable downstream (across the module boundary):
+soundness hands back the declarative `ValidPred` over the *input* base value,
+completeness discharges `isOk`, and the predicate's conjuncts project out.
+-/
+
+example {b : Order} {v : Valid.Order} (h : Valid.Order.validate b = .ok v) :
+    Valid.Order.ValidPred b :=
+  Valid.Order.validate_sound h
+
+example {b : Order} {v : Valid.Order} (h : Valid.Order.validate b = .ok v) :
+    ∀ x ∈ b.items, Valid.Item.ValidPred x :=
+  (Valid.Order.validate_sound h).items_elems
+
+example {b : Order} (h : Valid.Order.ValidPred b) : (Valid.Order.validate b).isOk :=
+  Valid.Order.validate_complete h
+
+example {bytes : ByteArray} {v : Valid.Order} (h : Valid.Order.decodeValid bytes = .ok v) :
+    ∃ b, Order.decode bytes = .ok b ∧ Valid.Order.validate b = .ok v :=
+  Valid.Order.decodeValid_sound h
+
 def expect (cond : Bool) (msg : String) : IO Unit := do
   if cond then pure () else throw (IO.userError msg)
 

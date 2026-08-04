@@ -7,7 +7,7 @@ validate/toBase at runtime.
 """
 
 load("@protobuf//bazel:proto_library.bzl", "proto_library")
-load("@rules_lean//lean:defs.bzl", "lean_test")
+load("@rules_lean//lean:defs.bzl", "lean_assurance_test", "lean_test")
 load("@rules_lean_grpc//:defs.bzl", "lean_proto_library")
 load("//protovalidate:defs.bzl", "lean_protovalidate_library")
 
@@ -35,6 +35,21 @@ lean_protovalidate_library(
     lean_proto = ":shipping_lean",
     proto = ":shipping_proto",
     valid_deps = ["//examples/common:money_valid"],
+)
+
+# Compile-time audit of the generated soundness/completeness theorems: they
+# must exist, be theorems, and depend on no axiom beyond the standard three
+# (in particular no sorryAx) anywhere in the generated modules.
+lean_assurance_test(
+    name = "shipping_valid_assurance",
+    principal_theorems = [
+        "shipping.v1.Valid.Order.validate_sound",
+        "shipping.v1.Valid.Order.validate_complete",
+        "shipping.v1.Valid.Order.decodeValid_sound",
+        "catalog.v1.Valid.Product.validate_sound",
+        "catalog.v1.Valid.Payment.validate_complete",
+    ],
+    deps = [":shipping_valid"],
 )
 
 lean_test(
