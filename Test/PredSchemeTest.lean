@@ -266,6 +266,81 @@ theorem Order.validate_sound {b : BOrder} {v : Order} (h : Order.validate b = .o
 theorem Order.validate_complete {b : BOrder} (h : Order.ValidPred b) : (Order.validate b).isOk :=
   Protovalidate.Decision.toExcept_isOk h
 
+/-! ### Payment: required constrained oneof, message rules over mapRequired views -/
+
+structure BPayment where
+  method : Option BPayer := none
+
+inductive Payment.method_Type where
+  | customer : { x : String // x.length ≥ 3 } → Payment.method_Type
+  | account : String → Payment.method_Type
+
+def Payment.method_Type.ValidPred : BPayer → Prop
+  | .customer x => x.length ≥ 3
+  | .account _ => True
+
+def Payment.method_Type.checkPred : (b : BPayer) → Protovalidate.Decision (Payment.method_Type.ValidPred b)
+  | .customer x =>
+    if h0 : x.length ≥ 3 then .ok h0
+    else .fail (fun hc => h0 hc) { fieldPath := "customer", ruleId := "c.min", message := "short" }
+  | .account _ => .ok True.intro
+
+def Payment.method_Type.ofPred : (b : BPayer) → Payment.method_Type.ValidPred b → Payment.method_Type
+  | .customer x, h => .customer ⟨x, h⟩
+  | .account x, _ => .account x
+
+def Payment.method_Type.toBase : Payment.method_Type → BPayer
+  | .customer x => .customer x.val
+  | .account x => .account x
+
+-- Bare-sum accessor: required oneofs use dot form on the sum itself.
+def Payment.method_Type.customer_or_default : Payment.method_Type → String
+  | .customer v => v.val
+  | _ => ""
+
+structure Payment.ValidPred (b : BPayment) : Prop where
+  method_present : b.method.isSome
+  method : ∀ x, b.method = some x → Payment.method_Type.ValidPred x
+  pay_customer_len :
+    (Protovalidate.mapRequired b.method Payment.method_Type.ofPred method_present method).customer_or_default.length ≤ 20
+
+structure Payment where
+  method : Payment.method_Type
+  pay_customer_len : method.customer_or_default.length ≤ 20
+
+def Payment.checkPred (b : BPayment) : Protovalidate.Decision (Payment.ValidPred b) :=
+  Protovalidate.Decision.step
+    (q := b.method.isSome ∧ (∀ x, b.method = some x → Payment.method_Type.ValidPred x))
+    (match b.method with
+     | none => .fail (fun hc => Protovalidate.not_isSome_none hc.1)
+         { fieldPath := "method", ruleId := "required", message := "exactly one field of oneof method must be set" }
+     | some x => (Payment.method_Type.checkPred x).imp
+         (fun v => ⟨rfl, Protovalidate.someHolds_self v⟩) (fun hq => hq.2 x rfl))
+    (fun hh => ⟨hh.method_present, hh.method⟩) fun ⟨h_method_present, h_method⟩ =>
+  if h_pay_customer_len :
+      (Protovalidate.mapRequired b.method Payment.method_Type.ofPred h_method_present h_method).customer_or_default.length ≤ 20 then
+    .ok ⟨h_method_present, h_method, h_pay_customer_len⟩
+  else .fail (fun hh => h_pay_customer_len hh.pay_customer_len)
+    { fieldPath := "", ruleId := "pay.customer_len", message := "too long" }
+
+def Payment.ofPred (b : BPayment) (h : Payment.ValidPred b) : Payment :=
+  { method := Protovalidate.mapRequired b.method Payment.method_Type.ofPred h.method_present h.method,
+    pay_customer_len := h.pay_customer_len }
+
+def Payment.validate (b : BPayment) : Except Protovalidate.Violation Payment :=
+  (Payment.checkPred b).toExcept (Payment.ofPred b)
+
+def Payment.toBase (v : Payment) : BPayment :=
+  { method := some v.method.toBase }
+
+theorem Payment.validate_sound {b : BPayment} {v : Payment} (h : Payment.validate b = .ok v) :
+    Payment.ValidPred b :=
+  Protovalidate.Decision.pred_of_toExcept_ok h
+
+theorem Payment.validate_complete {b : BPayment} (h : Payment.ValidPred b) :
+    (Payment.validate b).isOk :=
+  Protovalidate.Decision.toExcept_isOk h
+
 end Valid
 
 /-! ### The theorems are usable downstream -/

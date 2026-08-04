@@ -16,6 +16,10 @@ import (
 // subtype are parenthesized when their translation binds more loosely.
 const precAndOperand = 36
 
+// runtimeNS qualifies the Protovalidate runtime absolutely: generated code
+// lives inside proto-package namespaces whose components could shadow it.
+const runtimeNS = "_root_.Protovalidate"
+
 type fieldShape int
 
 const (
@@ -50,6 +54,16 @@ type fieldPlan struct {
 	props     []string
 	// nested is set when the field embeds another validated message.
 	nested *msgInfo
+
+	// ValidPred conjunct names (empty when the conjunct does not apply):
+	// presenceConj is the `isSome` conjunct of required Option shapes,
+	// elemsConj the element-predicate conjunct of rule-carrying nested lists,
+	// mainConj the field's rule/nested-predicate conjunct.
+	presenceConj string
+	elemsConj    string
+	mainConj     string
+	// predBinder is the ∀-binder of Option/element conjuncts.
+	predBinder string
 }
 
 func (p *fieldPlan) constrained() bool { return len(p.rules) > 0 }
@@ -71,6 +85,11 @@ type oneofPlan struct {
 	validSum    string // fully-qualified validated sum type (when constrained)
 	sumLocal    string // declared name of the validated sum within the namespace
 	typeText    string // the oneof field's type in the validated structure
+
+	// ValidPred conjunct names (as for fieldPlan).
+	presenceConj string
+	mainConj     string
+	predBinder   string
 }
 
 type oneofMember struct {
@@ -99,9 +118,19 @@ func (mem *oneofMember) ctorType() string {
 type propPlan struct {
 	name string
 	hyp  string
-	text string
-	rule *validatepb.Rule
+	text string // over the validated structure's fields (structure Prop field)
+	// predText/checkText phrase the same rule over the base value's
+	// constructed views: predText references ValidPred fields by name,
+	// checkText the checkPred hypothesis binders.
+	predText  string
+	checkText string
+	rule      *validatepb.Rule
 }
+
+// refFn resolves a ValidPred conjunct name to its reference text in the
+// current context: the bare field name inside the ValidPred structure,
+// `h.<name>` in ofPred, the bound hypothesis in checkPred.
+type refFn func(conjName string) string
 
 type fileGen struct {
 	cfg     Config
@@ -240,22 +269,23 @@ func (fg *fileGen) translate(cel string, opts celtolean.Options) (*celtolean.Res
 	return res, nil
 }
 
-func violation(fieldPath, id, message string) string {
-	return "Except.error { fieldPath := " + celtolean.LeanString(fieldPath) +
+// violationLit renders a Protovalidate.Violation structure literal.
+func violationLit(fieldPath, id, message string) string {
+	return "{ fieldPath := " + celtolean.LeanString(fieldPath) +
 		", ruleId := " + celtolean.LeanString(id) +
 		", message := " + celtolean.LeanString(message) + " }"
 }
 
-func ruleViolation(fieldPath string, r loweredRule) string {
+func ruleViolationLit(fieldPath string, r loweredRule) string {
 	msg := r.message
 	if msg == "" {
 		msg = r.cel
 	}
-	return violation(fieldPath, r.id, msg)
+	return violationLit(fieldPath, r.id, msg)
 }
 
 // iteChain renders nested dependent ifs deciding each rule, yielding ok with
-// all hypotheses in scope or the violation of the first failing rule.
+// all hypotheses in scope or the first failing rule's else-branch text.
 func iteChain(w *strings.Builder, indent string, hyps, conds []string, ok string, errs []string) {
 	if len(conds) == 0 {
 		w.WriteString(indent + ok + "\n")
@@ -264,6 +294,19 @@ func iteChain(w *strings.Builder, indent string, hyps, conds []string, ok string
 	w.WriteString(indent + "if " + hyps[0] + " : " + conds[0] + " then\n")
 	iteChain(w, indent+"  ", hyps[1:], conds[1:], ok, errs[1:])
 	w.WriteString(indent + "else " + errs[0] + "\n")
+}
+
+// andPath projects the i-th conjunct out of a right-nested n-conjunction
+// proof term.
+func andPath(base string, i, n int) string {
+	s := base
+	for k := 0; k < i; k++ {
+		s += ".2"
+	}
+	if i < n-1 {
+		s += ".1"
+	}
+	return s
 }
 
 // zeroEscape is the Lean proposition "the value is its protobuf zero value",
@@ -352,24 +395,35 @@ func (fg *fileGen) renderProps(p *fieldPlan, subject string) (string, error) {
 	return conj, nil
 }
 
-// validateChain renders the dite chain deciding a field's rules, including
-// the ignoreZero escape, yielding okOf(proof term text).
-func (fg *fileGen) validateChain(w *strings.Builder, indent string, p *fieldPlan, subject, fieldPath string,
-	okOf func(proof string) string) error {
-	conds := make([]string, 0, len(p.rules))
-	errs := make([]string, 0, len(p.rules))
-	hyps := make([]string, 0, len(p.rules))
+// decisionChain renders the dependent-if chain deciding a field's rules as a
+// Decision term: `okOf(proof)` on success, `.fail (fun hc => …) violation` on
+// the first failing rule. `conjOf(hc)` recovers the field's whole rule
+// conjunction from the step's conjunct hypothesis (e.g. `hc`, or
+// `(hc x rfl)` under a presence quantifier), which the failure glue projects.
+func (fg *fileGen) decisionChain(w *strings.Builder, indent string, p *fieldPlan, subject, fieldPath string,
+	okOf func(proof string) string, conjOf func(hc string) string, hcName string) error {
+	n := len(p.rules)
+	conds := make([]string, 0, n)
+	errs := make([]string, 0, n)
+	hyps := make([]string, 0, n)
 	for i, r := range p.rules {
 		t, _, err := fg.renderRule(r, subject)
 		if err != nil {
 			return fmt.Errorf("field %s: %w", p.protoName, err)
 		}
 		conds = append(conds, t)
-		hyps = append(hyps, fmt.Sprintf("h%d", i))
-		errs = append(errs, ruleViolation(fieldPath, r))
+		hyp := fmt.Sprintf("h%d", i)
+		hyps = append(hyps, hyp)
+		var neg string
+		if p.ignoreZero {
+			neg = conjOf(hcName) + ".elim h_z (fun hcz => " + hyp + " " + andPath("hcz", i, n) + ")"
+		} else {
+			neg = hyp + " " + andPath(conjOf(hcName), i, n)
+		}
+		errs = append(errs, ".fail (fun "+hcName+" => "+neg+") "+ruleViolationLit(fieldPath, r))
 	}
 	proof := "⟨" + strings.Join(hyps, ", ") + "⟩"
-	if len(hyps) == 1 {
+	if n == 1 {
 		proof = hyps[0]
 	}
 	if p.ignoreZero {
@@ -677,6 +731,8 @@ func (fg *fileGen) emitMessage(w *strings.Builder, mi *msgInfo) error {
 	}
 
 	// validate-scope binders, dodging fields, props, and every rule ident.
+	// h0…/h_z are the fixed inner-chain hypothesis names; reserve them so the
+	// generated conjunct hypotheses can never collide.
 	binderTaken := map[string]bool{}
 	for k := range taken {
 		binderTaken[k] = true
@@ -684,9 +740,252 @@ func (fg *fileGen) emitMessage(w *strings.Builder, mi *msgInfo) error {
 	for k := range ruleIdents {
 		binderTaken[k] = true
 	}
+	for i := 0; i < 64; i++ {
+		binderTaken[fmt.Sprintf("h%d", i)] = true
+	}
+	binderTaken["h_z"] = true
 	bName := uniqueName("b", binderTaken)
 	for _, pr := range props {
 		pr.hyp = uniqueName("h_"+pr.name, binderTaken)
+	}
+	hName := uniqueName("h", binderTaken)
+	hcName := uniqueName("hc", binderTaken)
+	hhName := uniqueName("hh", binderTaken)
+	hqName := uniqueName("hq", binderTaken)
+	vName := uniqueName("v", binderTaken)
+
+	// ---- ValidPred conjunct planning ----------------------------------------
+	// Conjunct names live in the ValidPred structure's namespace: field names
+	// are reused verbatim, presence/element conjuncts get suffixed names.
+	predTaken := map[string]bool{}
+	for _, p := range fields {
+		predTaken[p.leanName] = true
+	}
+	for _, op := range oneofs {
+		predTaken[op.leanName] = true
+	}
+	for _, pr := range props {
+		predTaken[pr.name] = true
+	}
+	conjOrder := []string{} // ValidPred field order
+	bindOf := map[string]string{}
+	addConj := func(name string) string {
+		conjOrder = append(conjOrder, name)
+		bindOf[name] = uniqueName("h_"+name, binderTaken)
+		return name
+	}
+	for _, p := range fields {
+		if p.subBinder == "" && (p.nested != nil || p.shape == shapeOption) {
+			p.predBinder = freshTaken("x", union(binderTaken, ruleIdents))
+		} else {
+			p.predBinder = p.subBinder
+		}
+		switch {
+		case p.constrained() && p.shape != shapeOption:
+			if p.nested != nil && p.shape == shapeList {
+				p.elemsConj = addConj(celtolean.LeanIdent(uniqueName(p.protoName+"_elems", predTaken)))
+			}
+			p.mainConj = addConj(p.leanName)
+		case p.shape == shapeOption && (p.constrained() || p.required):
+			if p.required {
+				p.presenceConj = addConj(celtolean.LeanIdent(uniqueName(p.protoName+"_present", predTaken)))
+			}
+			if p.constrained() || p.nested != nil {
+				p.mainConj = addConj(p.leanName)
+			}
+		case p.nested != nil:
+			p.mainConj = addConj(p.leanName)
+		}
+	}
+	for _, op := range oneofs {
+		op.predBinder = freshTaken("x", union(binderTaken, ruleIdents))
+		if op.required {
+			op.presenceConj = addConj(celtolean.LeanIdent(uniqueName(op.protoName+"_present", predTaken)))
+		}
+		if op.constrained {
+			op.mainConj = addConj(op.leanName)
+		}
+	}
+	for _, pr := range props {
+		conjOrder = append(conjOrder, pr.name)
+		bindOf[pr.name] = pr.hyp
+	}
+	if len(conjOrder) == 0 {
+		return fmt.Errorf("internal: message needs a validated variant but has no rule conjuncts")
+	}
+
+	predRef := func(n string) string { return n }
+	ofRef := func(n string) string { return hName + "." + n }
+	checkRef := func(n string) string { return bindOf[n] }
+
+	// Per-field ofPred construction and CEL views over the constructed value.
+	fieldAccess := func(p *fieldPlan) string { return bName + "." + p.leanName }
+	fieldConstr := func(p *fieldPlan, ref refFn) string {
+		access := fieldAccess(p)
+		vq := ""
+		if p.nested != nil {
+			vq = validQualified(p.nested.msg)
+		}
+		switch {
+		case p.constrained() && p.shape != shapeOption:
+			if p.nested != nil && p.shape == shapeList {
+				return "⟨" + runtimeNS + ".mapArray " + access + " " + vq + ".ofPred " + ref(p.elemsConj) + ", " + ref(p.mainConj) + "⟩"
+			}
+			return "⟨" + access + ", " + ref(p.mainConj) + "⟩"
+		case p.unwrapped():
+			switch {
+			case p.constrained():
+				return runtimeNS + ".subtypeRequired " + access + " " + ref(p.presenceConj) + " " + ref(p.mainConj)
+			case p.nested != nil:
+				return runtimeNS + ".mapRequired " + access + " " + vq + ".ofPred " + ref(p.presenceConj) + " " + ref(p.mainConj)
+			default:
+				return runtimeNS + ".getSome " + access + " " + ref(p.presenceConj)
+			}
+		case p.shape == shapeOption && p.constrained():
+			return runtimeNS + ".subtypeOption " + access + " " + ref(p.mainConj)
+		case p.shape == shapeOption && p.nested != nil:
+			return runtimeNS + ".mapOption " + access + " " + vq + ".ofPred " + ref(p.mainConj)
+		case p.shape == shapeList && p.nested != nil:
+			return runtimeNS + ".mapArray " + access + " " + vq + ".ofPred " + ref(p.mainConj)
+		default:
+			return access
+		}
+	}
+	oneofAccess := func(op *oneofPlan) string { return bName + "." + op.leanName }
+	oneofConstr := func(op *oneofPlan, ref refFn) string {
+		access := oneofAccess(op)
+		switch {
+		case op.required && op.constrained:
+			return runtimeNS + ".mapRequired " + access + " " + op.validSum + ".ofPred " + ref(op.presenceConj) + " " + ref(op.mainConj)
+		case op.required:
+			return runtimeNS + ".getSome " + access + " " + ref(op.presenceConj)
+		case op.constrained:
+			return runtimeNS + ".mapOption " + access + " " + op.validSum + ".ofPred " + ref(op.mainConj)
+		default:
+			return access
+		}
+	}
+
+	// predThisFields phrases the message rules' CEL views over the base value
+	// and the constructed validated fields — exactly the values the structure's
+	// Prop fields see after `ofPred`, so the proofs transfer verbatim.
+	predThisFields := func(ref refFn) map[string]celtolean.ThisField {
+		out := map[string]celtolean.ThisField{}
+		for _, p := range fields {
+			access := fieldAccess(p)
+			vq := ""
+			if p.nested != nil {
+				vq = validQualified(p.nested.msg)
+			}
+			var value, has string
+			switch {
+			case p.unwrapped():
+				has = "true"
+				switch {
+				case p.constrained():
+					value = "(" + fieldConstr(p, ref) + ").val"
+				case p.nested != nil:
+					value = "(" + fieldConstr(p, ref) + ").toBase"
+				default:
+					value = "(" + fieldConstr(p, ref) + ")"
+				}
+			case p.shape == shapeOption:
+				if p.viewName != "" {
+					value = "(" + local + "." + p.viewName + " (" + fieldConstr(p, ref) + "))"
+					has = "(" + fieldConstr(p, ref) + ").isSome"
+				} else {
+					value = "(" + access + ".getD " + p.defaultText() + ")"
+					has = access + ".isSome"
+				}
+			case p.shape == shapeList && p.nested != nil:
+				// The refined array's `.val` reduces away on the literal
+				// construction, so the view maps `toBase` over the mapped
+				// elements directly (defeq to the structure's Prop text).
+				mapped := "(" + runtimeNS + ".mapArray " + access + " " + vq + ".ofPred "
+				if p.constrained() {
+					mapped += ref(p.elemsConj) + ")"
+				} else {
+					mapped += ref(p.mainConj) + ")"
+				}
+				value = "(" + mapped + ".map " + vq + ".toBase)"
+				has = "!" + value + ".isEmpty"
+			default:
+				// Plain shapes: refinements over the base value project away
+				// definitionally, so the base access is the CEL value.
+				value = access
+				has = p.hasText(value)
+			}
+			out[p.protoName] = celtolean.ThisField{Text: value, Has: has}
+		}
+		for _, op := range oneofs {
+			accessorHome := op.sumLocal
+			if !op.constrained {
+				accessorHome = op.baseSum
+			}
+			oc := oneofConstr(op, ref)
+			if oc != oneofAccess(op) {
+				oc = "(" + oc + ")"
+			}
+			for _, mem := range op.members {
+				caseTest := oc + " matches ." + mem.plan.leanName + " _"
+				text := oc + "." + mem.accName
+				if !op.required {
+					caseTest = oc + ".any (· matches ." + mem.plan.leanName + " _)"
+					text = "(" + accessorHome + "." + mem.accName + " " + oc + ")"
+				}
+				out[mem.plan.protoName] = celtolean.ThisField{Text: text, Has: caseTest}
+			}
+		}
+		return out
+	}
+	for _, pr := range props {
+		attrs, err := pathAttrsForMessage(m.Desc, pr.rule.GetExpression())
+		if err != nil {
+			return fmt.Errorf("message rule %q: %w", pr.rule.GetId(), err)
+		}
+		res, err := fg.translate(pr.rule.GetExpression(), celtolean.Options{ThisFields: predThisFields(predRef), PathAttrs: attrs})
+		if err != nil {
+			return fmt.Errorf("message rule %q: %w", pr.rule.GetId(), err)
+		}
+		pr.predText = res.Lean
+		res, err = fg.translate(pr.rule.GetExpression(), celtolean.Options{ThisFields: predThisFields(checkRef), PathAttrs: attrs})
+		if err != nil {
+			return fmt.Errorf("message rule %q: %w", pr.rule.GetId(), err)
+		}
+		pr.checkText = res.Lean
+	}
+
+	// Conjunct Prop texts (rendered per reference context).
+	presenceType := func(access string) string { return access + ".isSome" }
+	fieldMainType := func(p *fieldPlan, ref refFn) (string, error) {
+		access := fieldAccess(p)
+		switch {
+		case p.constrained() && p.shape != shapeOption:
+			subject := access
+			if p.nested != nil && p.shape == shapeList {
+				subject = "(" + runtimeNS + ".mapArray " + access + " " + validQualified(p.nested.msg) + ".ofPred " + ref(p.elemsConj) + ")"
+			}
+			return fg.renderProps(p, subject)
+		case p.shape == shapeOption && p.constrained():
+			propsText, err := fg.renderProps(p, p.predBinder)
+			if err != nil {
+				return "", err
+			}
+			return "∀ " + p.predBinder + ", " + access + " = some " + p.predBinder + " → (" + propsText + ")", nil
+		case p.shape == shapeOption && p.nested != nil:
+			return "∀ " + p.predBinder + ", " + access + " = some " + p.predBinder + " → " +
+				validQualified(p.nested.msg) + ".ValidPred " + p.predBinder, nil
+		case p.shape == shapeList && p.nested != nil:
+			return "∀ " + p.predBinder + " ∈ " + access + ", " + validQualified(p.nested.msg) + ".ValidPred " + p.predBinder, nil
+		}
+		return "", fmt.Errorf("field %s: no main conjunct", p.protoName)
+	}
+	elemsTypeText := func(p *fieldPlan) string {
+		return "∀ " + p.predBinder + " ∈ " + fieldAccess(p) + ", " + validQualified(p.nested.msg) + ".ValidPred " + p.predBinder
+	}
+	oneofMainType := func(op *oneofPlan) string {
+		return "∀ " + op.predBinder + ", " + oneofAccess(op) + " = some " + op.predBinder + " → " +
+			op.validSum + ".ValidPred " + op.predBinder
 	}
 
 	// ---- validated oneof sums ------------------------------------------------
@@ -723,6 +1022,60 @@ func (fg *fileGen) emitMessage(w *strings.Builder, mi *msgInfo) error {
 			local, p.viewName, p.leanName, p.typeText, p.thisType, body)
 	}
 
+	// ---- ValidPred -----------------------------------------------------------
+	ruleDocs := func(p *fieldPlan) string {
+		docs := make([]string, 0, len(p.rules))
+		for _, r := range p.rules {
+			d := r.id
+			if r.cel != "" {
+				d = fmt.Sprintf("`%s` (%s)", docText(r.cel), docText(r.id))
+			}
+			docs = append(docs, d)
+		}
+		return strings.Join(docs, "; ")
+	}
+	fmt.Fprintf(w, "/-- Declarative validity of a base `%s`: one Prop per protovalidate rule\n", string(m.Desc.FullName()))
+	fmt.Fprintf(w, "conjunct, over the base value. `validate` succeeds exactly on values satisfying it\n")
+	fmt.Fprintf(w, "(`validate_sound`/`validate_complete`). -/\n")
+	fmt.Fprintf(w, "structure %s.ValidPred (%s : %s) : Prop where\n", local, bName, base)
+	for _, p := range fields {
+		if p.elemsConj != "" {
+			fmt.Fprintf(w, "  /-- every element satisfies `%s.ValidPred` -/\n", validQualified(p.nested.msg))
+			fmt.Fprintf(w, "  %s : %s\n", p.elemsConj, elemsTypeText(p))
+		}
+		if p.presenceConj != "" {
+			fmt.Fprintf(w, "  /-- required -/\n")
+			fmt.Fprintf(w, "  %s : %s\n", p.presenceConj, presenceType(fieldAccess(p)))
+		}
+		if p.mainConj != "" {
+			if p.constrained() {
+				fmt.Fprintf(w, "  /-- %s -/\n", ruleDocs(p))
+			} else {
+				fmt.Fprintf(w, "  /-- `%s.ValidPred` for the embedded message -/\n", validQualified(p.nested.msg))
+			}
+			t, err := fieldMainType(p, predRef)
+			if err != nil {
+				return err
+			}
+			fmt.Fprintf(w, "  %s : %s\n", p.mainConj, t)
+		}
+	}
+	for _, op := range oneofs {
+		if op.presenceConj != "" {
+			fmt.Fprintf(w, "  /-- required: exactly one case must be set -/\n")
+			fmt.Fprintf(w, "  %s : %s\n", op.presenceConj, presenceType(oneofAccess(op)))
+		}
+		if op.mainConj != "" {
+			fmt.Fprintf(w, "  /-- the active case satisfies `%s.ValidPred` -/\n", op.validSum)
+			fmt.Fprintf(w, "  %s : %s\n", op.mainConj, oneofMainType(op))
+		}
+	}
+	for _, pr := range props {
+		fmt.Fprintf(w, "  /-- CEL: `%s` (%s) -/\n", docText(pr.rule.GetExpression()), docText(pr.rule.GetId()))
+		fmt.Fprintf(w, "  %s : %s\n", pr.name, pr.predText)
+	}
+	w.WriteString("\n")
+
 	// ---- structure ----------------------------------------------------------
 	fmt.Fprintf(w, "/-- Validated `%s`: refinement of `%s` by its protovalidate rules. -/\n",
 		m.Desc.FullName(), string(m.Desc.FullName()))
@@ -733,11 +1086,7 @@ func (fg *fileGen) emitMessage(w *strings.Builder, mi *msgInfo) error {
 			if p.unwrapped() {
 				docs = append(docs, "required")
 			}
-			for _, r := range p.rules {
-				d := r.id
-				if r.cel != "" {
-					d = fmt.Sprintf("`%s` (%s)", docText(r.cel), docText(r.id))
-				}
+			if d := ruleDocs(p); d != "" {
 				docs = append(docs, d)
 			}
 			fmt.Fprintf(w, "  /-- %s -/\n", strings.Join(docs, "; "))
@@ -756,115 +1105,239 @@ func (fg *fileGen) emitMessage(w *strings.Builder, mi *msgInfo) error {
 	}
 	w.WriteString("\n")
 
-	// ---- validate ------------------------------------------------------------
-	fmt.Fprintf(w, "/-- Decide every protovalidate rule on a `%s`, producing the validated refinement or the first violation. -/\n",
-		string(m.Desc.FullName()))
-	fmt.Fprintf(w, "def %s.validate (%s : %s) : Except _root_.Protovalidate.Violation %s := do\n",
-		local, bName, base, local)
+	// ---- checkPred -----------------------------------------------------------
+	fmt.Fprintf(w, "/-- Decide `ValidPred` wholesale: a proof of every rule, or a refutation with\n")
+	fmt.Fprintf(w, "the first violation in protovalidate rule order. -/\n")
+	fmt.Fprintf(w, "def %s.checkPred (%s : %s) : %s.Decision (%s.ValidPred %s) :=\n",
+		local, bName, base, runtimeNS, local, bName)
+	stepHead := func(qText string) string {
+		return "  " + runtimeNS + ".Decision.step (q := " + qText + ")"
+	}
+	stepFoot := func(w *strings.Builder, conjNames []string) {
+		projs := make([]string, 0, len(conjNames))
+		binds := make([]string, 0, len(conjNames))
+		for _, n := range conjNames {
+			projs = append(projs, hhName+"."+n)
+			binds = append(binds, bindOf[n])
+		}
+		proj := projs[0]
+		bind := binds[0]
+		if len(conjNames) > 1 {
+			proj = "⟨" + strings.Join(projs, ", ") + "⟩"
+			bind = "⟨" + strings.Join(binds, ", ") + "⟩"
+		}
+		fmt.Fprintf(w, "    (fun %s => %s) fun %s =>\n", hhName, proj, bind)
+	}
 	for _, p := range fields {
-		access := bName + "." + p.leanName
+		access := fieldAccess(p)
+		vq := ""
+		if p.nested != nil {
+			vq = validQualified(p.nested.msg)
+		}
 		switch {
 		case p.constrained() && p.shape != shapeOption:
-			if p.nested != nil && p.shape == shapeList {
-				// Validate elements first; the list rules then refine the
-				// array of validated elements.
-				elems := freshTaken(p.protoName+"_elems", union(binderTaken, ruleIdents))
-				fmt.Fprintf(w, "  let %s ← %s.mapM %s.validate\n", elems, access, validQualified(p.nested.msg))
-				access = elems
+			if p.elemsConj != "" {
+				w.WriteString(stepHead(elemsTypeText(p)) + "\n")
+				fmt.Fprintf(w, "    (%s.checkArray %s.checkPred %s)\n", runtimeNS, vq, access)
+				stepFoot(w, []string{p.elemsConj})
 			}
-			fmt.Fprintf(w, "  let %s : %s ←\n", p.leanName, p.typeText)
-			okOf := func(proof string) string { return "Except.ok ⟨" + access + ", " + proof + "⟩" }
-			if err := fg.validateChain(w, "    ", p, access, p.protoName, okOf); err != nil {
+			qText, err := fieldMainType(p, checkRef)
+			if err != nil {
 				return err
 			}
-		case p.shape == shapeOption && (p.constrained() || p.required):
-			vName := freshTaken("v", union(binderTaken, ruleIdents))
-			fmt.Fprintf(w, "  let %s : %s ←\n", p.leanName, p.typeText)
-			fmt.Fprintf(w, "    match %s with\n", access)
-			if p.required {
-				fmt.Fprintf(w, "    | none => %s\n", violation(p.protoName, "required", "value is required"))
-			} else {
-				fmt.Fprintf(w, "    | none => Except.ok none\n")
+			w.WriteString(stepHead(qText) + "\n")
+			subject := access
+			if p.elemsConj != "" {
+				subject = "(" + runtimeNS + ".mapArray " + access + " " + vq + ".ofPred " + checkRef(p.elemsConj) + ")"
 			}
-			fmt.Fprintf(w, "    | some %s =>\n", vName)
-			switch {
-			case p.constrained():
-				okOf := func(proof string) string {
-					if p.unwrapped() {
-						return "Except.ok ⟨" + vName + ", " + proof + "⟩"
-					}
-					return "Except.ok (some ⟨" + vName + ", " + proof + "⟩)"
-				}
-				if err := fg.validateChain(w, "      ", p, vName, p.protoName, okOf); err != nil {
+			okOf := func(proof string) string { return ".ok " + wrapProof(proof) }
+			conjOf := func(hc string) string { return hc }
+			w.WriteString("    (")
+			chain := &strings.Builder{}
+			if err := fg.decisionChain(chain, "", p, subject, p.protoName, okOf, conjOf, hcName); err != nil {
+				return err
+			}
+			w.WriteString(indentBlock(chain.String(), "     ") + ")\n")
+			stepFoot(w, []string{p.mainConj})
+		case p.shape == shapeOption && (p.constrained() || p.required):
+			conjNames := []string{}
+			if p.presenceConj != "" {
+				conjNames = append(conjNames, p.presenceConj)
+			}
+			if p.mainConj != "" {
+				conjNames = append(conjNames, p.mainConj)
+			}
+			pair := len(conjNames) == 2
+			qParts := []string{}
+			if p.presenceConj != "" {
+				qParts = append(qParts, presenceType(access))
+			}
+			if p.mainConj != "" {
+				t, err := fieldMainType(p, checkRef)
+				if err != nil {
 					return err
 				}
-			case p.nested != nil:
-				if p.unwrapped() {
-					fmt.Fprintf(w, "      %s.validate %s\n", validQualified(p.nested.msg), vName)
-				} else {
-					fmt.Fprintf(w, "      (%s.validate %s).map some\n", validQualified(p.nested.msg), vName)
+				if pair {
+					t = "(" + t + ")"
 				}
-			default: // required, no rules
-				fmt.Fprintf(w, "      Except.ok %s\n", vName)
+				qParts = append(qParts, t)
 			}
-		case p.nested != nil && p.shape == shapeOption:
-			vName := freshTaken("v", binderTaken)
-			fmt.Fprintf(w, "  let %s ← match %s with\n", p.leanName, access)
-			fmt.Fprintf(w, "    | none => Except.ok none\n")
-			fmt.Fprintf(w, "    | some %s => (%s.validate %s).map some\n", vName, validQualified(p.nested.msg), vName)
-		case p.nested != nil && p.shape == shapeList:
-			fmt.Fprintf(w, "  let %s ← %s.mapM %s.validate\n", p.leanName, access, validQualified(p.nested.msg))
-		default:
-			fmt.Fprintf(w, "  let %s := %s\n", p.leanName, access)
+			w.WriteString(stepHead(strings.Join(qParts, " ∧ ")) + "\n")
+			fmt.Fprintf(w, "    (match %s with\n", access)
+			if p.required {
+				neg := runtimeNS + ".not_isSome_none " + hcName
+				if pair {
+					neg = runtimeNS + ".not_isSome_none " + hcName + ".1"
+				}
+				fmt.Fprintf(w, "     | none => .fail (fun %s => %s) %s\n",
+					hcName, neg, violationLit(p.protoName, "required", "value is required"))
+			} else {
+				fmt.Fprintf(w, "     | none => .ok %s.someHolds_none\n", runtimeNS)
+			}
+			switch {
+			case p.constrained():
+				fmt.Fprintf(w, "     | some %s =>\n", p.predBinder)
+				okOf := func(proof string) string {
+					if pair {
+						return ".ok ⟨rfl, " + runtimeNS + ".someHolds_self " + wrapProof(proof) + "⟩"
+					}
+					return ".ok (" + runtimeNS + ".someHolds_self " + wrapProof(proof) + ")"
+				}
+				conjOf := func(hc string) string {
+					if pair {
+						return "(" + hc + ".2 " + p.predBinder + " rfl)"
+					}
+					return "(" + hc + " " + p.predBinder + " rfl)"
+				}
+				chain := &strings.Builder{}
+				if err := fg.decisionChain(chain, "       ", p, p.predBinder, p.protoName, okOf, conjOf, hcName); err != nil {
+					return err
+				}
+				w.WriteString(strings.TrimRight(chain.String(), "\n") + ")\n")
+			case p.nested != nil:
+				if pair {
+					fmt.Fprintf(w, "     | some %s => (%s.checkPred %s).imp\n", p.predBinder, vq, p.predBinder)
+					fmt.Fprintf(w, "         (fun %s => ⟨rfl, %s.someHolds_self %s⟩) (fun %s => %s.2 %s rfl))\n",
+						vName, runtimeNS, vName, hqName, hqName, p.predBinder)
+				} else {
+					fmt.Fprintf(w, "     | some %s => (%s.checkPred %s).imp %s.someHolds_self (fun %s => %s %s rfl))\n",
+						p.predBinder, vq, p.predBinder, runtimeNS, hqName, hqName, p.predBinder)
+				}
+			default: // required, no rules, plain payload
+				fmt.Fprintf(w, "     | some _ => .ok rfl)\n")
+			}
+			stepFoot(w, conjNames)
+		case p.shape == shapeOption && p.nested != nil:
+			t, err := fieldMainType(p, checkRef)
+			if err != nil {
+				return err
+			}
+			w.WriteString(stepHead(t) + "\n")
+			fmt.Fprintf(w, "    (match %s with\n", access)
+			fmt.Fprintf(w, "     | none => .ok %s.someHolds_none\n", runtimeNS)
+			fmt.Fprintf(w, "     | some %s => (%s.checkPred %s).imp %s.someHolds_self (fun %s => %s %s rfl))\n",
+				p.predBinder, vq, p.predBinder, runtimeNS, hqName, hqName, p.predBinder)
+			stepFoot(w, []string{p.mainConj})
+		case p.shape == shapeList && p.nested != nil:
+			t, err := fieldMainType(p, checkRef)
+			if err != nil {
+				return err
+			}
+			w.WriteString(stepHead(t) + "\n")
+			fmt.Fprintf(w, "    (%s.checkArray %s.checkPred %s)\n", runtimeNS, vq, access)
+			stepFoot(w, []string{p.mainConj})
 		}
 	}
 	for _, op := range oneofs {
-		access := bName + "." + op.leanName
+		access := oneofAccess(op)
 		switch {
 		case op.required && op.constrained:
-			fmt.Fprintf(w, "  let %s : %s ← match %s with\n", op.leanName, op.validSum, access)
-			fmt.Fprintf(w, "    | none => %s\n",
-				violation(op.protoName, "required", "exactly one field of oneof "+op.protoName+" must be set"))
-			fmt.Fprintf(w, "    | some v => %s.validate v\n", op.validSum)
+			w.WriteString(stepHead(presenceType(access)+" ∧ ("+oneofMainType(op)+")") + "\n")
+			fmt.Fprintf(w, "    (match %s with\n", access)
+			fmt.Fprintf(w, "     | none => .fail (fun %s => %s.not_isSome_none %s.1) %s\n",
+				hcName, runtimeNS, hcName,
+				violationLit(op.protoName, "required", "exactly one field of oneof "+op.protoName+" must be set"))
+			fmt.Fprintf(w, "     | some %s => (%s.checkPred %s).imp\n", op.predBinder, op.validSum, op.predBinder)
+			fmt.Fprintf(w, "         (fun %s => ⟨rfl, %s.someHolds_self %s⟩) (fun %s => %s.2 %s rfl))\n",
+				vName, runtimeNS, vName, hqName, hqName, op.predBinder)
+			stepFoot(w, []string{op.presenceConj, op.mainConj})
 		case op.required:
-			fmt.Fprintf(w, "  let %s ← match %s with\n", op.leanName, access)
-			fmt.Fprintf(w, "    | none => %s\n",
-				violation(op.protoName, "required", "exactly one field of oneof "+op.protoName+" must be set"))
-			fmt.Fprintf(w, "    | some v => Except.ok v\n")
+			w.WriteString(stepHead(presenceType(access)) + "\n")
+			fmt.Fprintf(w, "    (match %s with\n", access)
+			fmt.Fprintf(w, "     | none => .fail (fun %s => %s.not_isSome_none %s) %s\n",
+				hcName, runtimeNS, hcName,
+				violationLit(op.protoName, "required", "exactly one field of oneof "+op.protoName+" must be set"))
+			fmt.Fprintf(w, "     | some _ => .ok rfl)\n")
+			stepFoot(w, []string{op.presenceConj})
 		case op.constrained:
-			fmt.Fprintf(w, "  let %s ← match %s with\n", op.leanName, access)
-			fmt.Fprintf(w, "    | none => Except.ok none\n")
-			fmt.Fprintf(w, "    | some v => (%s.validate v).map some\n", op.validSum)
-		default:
-			fmt.Fprintf(w, "  let %s := %s\n", op.leanName, access)
+			w.WriteString(stepHead(oneofMainType(op)) + "\n")
+			fmt.Fprintf(w, "    (match %s with\n", access)
+			fmt.Fprintf(w, "     | none => .ok %s.someHolds_none\n", runtimeNS)
+			fmt.Fprintf(w, "     | some %s => (%s.checkPred %s).imp %s.someHolds_self (fun %s => %s %s rfl))\n",
+				op.predBinder, op.validSum, op.predBinder, runtimeNS, hqName, hqName, op.predBinder)
+			stepFoot(w, []string{op.mainConj})
 		}
 	}
-	var assigns []string
-	for _, p := range fields {
-		assigns = append(assigns, p.leanName+" := "+p.leanName)
+	// Message rules, then the assembled proof.
+	finalProof := make([]string, 0, len(conjOrder))
+	for _, n := range conjOrder {
+		finalProof = append(finalProof, bindOf[n])
 	}
-	for _, op := range oneofs {
-		assigns = append(assigns, op.leanName+" := "+op.leanName)
-	}
-	for _, pr := range props {
-		assigns = append(assigns, pr.name+" := "+pr.hyp)
-	}
-	finalOk := "Except.ok { " + strings.Join(assigns, ", ") + " }"
-	if len(assigns) == 0 {
-		finalOk = "Except.ok {}"
-	}
+	// ValidPred is a structure: the anonymous constructor is required even for
+	// a single conjunct (a bare proof term would not coerce).
+	finalOk := ".ok ⟨" + strings.Join(finalProof, ", ") + "⟩"
 	var propConds, propHyps, propErrs []string
 	for _, pr := range props {
-		propConds = append(propConds, pr.text)
+		propConds = append(propConds, pr.checkText)
 		propHyps = append(propHyps, pr.hyp)
 		msg := pr.rule.GetMessage()
 		if msg == "" {
 			msg = pr.rule.GetExpression()
 		}
-		propErrs = append(propErrs, violation("", pr.rule.GetId(), msg))
+		propErrs = append(propErrs,
+			".fail (fun "+hhName+" => "+pr.hyp+" "+hhName+"."+pr.name+") "+violationLit("", pr.rule.GetId(), msg))
 	}
 	iteChain(w, "  ", propHyps, propConds, finalOk, propErrs)
 	w.WriteString("\n")
+
+	// ---- ofPred --------------------------------------------------------------
+	fmt.Fprintf(w, "/-- Construct the validated structure from a `ValidPred` proof. -/\n")
+	fmt.Fprintf(w, "def %s.ofPred (%s : %s) (%s : %s.ValidPred %s) : %s :=\n",
+		local, bName, base, hName, local, bName, local)
+	var assigns []string
+	for _, p := range fields {
+		assigns = append(assigns, p.leanName+" := "+fieldConstr(p, ofRef))
+	}
+	for _, op := range oneofs {
+		assigns = append(assigns, op.leanName+" := "+oneofConstr(op, ofRef))
+	}
+	for _, pr := range props {
+		assigns = append(assigns, pr.name+" := "+ofRef(pr.name))
+	}
+	w.WriteString("  { " + strings.Join(assigns, ",\n    ") + " }\n\n")
+
+	// ---- validate / Decidable / theorems ------------------------------------
+	fmt.Fprintf(w, "/-- Decide every protovalidate rule on a `%s`, producing the validated refinement or the first violation. -/\n",
+		string(m.Desc.FullName()))
+	fmt.Fprintf(w, "def %s.validate (%s : %s) : Except %s.Violation %s :=\n",
+		local, bName, base, runtimeNS, local)
+	fmt.Fprintf(w, "  (%s.checkPred %s).toExcept (%s.ofPred %s)\n\n", local, bName, local, bName)
+
+	fmt.Fprintf(w, "instance %s.instDecidableValidPred : (%s : %s) → Decidable (%s.ValidPred %s) :=\n",
+		local, bName, base, local, bName)
+	fmt.Fprintf(w, "  fun %s => (%s.checkPred %s).toDecidable\n\n", bName, local, bName)
+
+	fmt.Fprintf(w, "/-- Soundness: a successful `validate` certifies `ValidPred` on the *input* base value. -/\n")
+	fmt.Fprintf(w, "theorem %s.validate_sound {%s : %s} {%s : %s}\n", local, bName, base, vName, local)
+	fmt.Fprintf(w, "    (%s : %s.validate %s = Except.ok %s) : %s.ValidPred %s :=\n",
+		hName, local, bName, vName, local, bName)
+	fmt.Fprintf(w, "  %s.Decision.pred_of_toExcept_ok %s\n\n", runtimeNS, hName)
+
+	fmt.Fprintf(w, "/-- Completeness: `ValidPred` guarantees `validate` succeeds. -/\n")
+	fmt.Fprintf(w, "theorem %s.validate_complete {%s : %s} (%s : %s.ValidPred %s) :\n",
+		local, bName, base, hName, local, bName)
+	fmt.Fprintf(w, "    (%s.validate %s).isOk :=\n", local, bName)
+	fmt.Fprintf(w, "  %s.Decision.toExcept_isOk %s\n\n", runtimeNS, hName)
 
 	// ---- toBase ---------------------------------------------------------------
 	fmt.Fprintf(w, "/-- Forget the refinements (any unknown fields are dropped). -/\n")
@@ -915,15 +1388,42 @@ func (fg *fileGen) emitMessage(w *strings.Builder, mi *msgInfo) error {
 	// ---- decodeValid ------------------------------------------------------------
 	fmt.Fprintf(w, "/-- Decode the wire format and validate in one step. -/\n")
 	fmt.Fprintf(w, "def %s.decodeValid (bytes : ByteArray) : Except String %s :=\n", local, local)
-	fmt.Fprintf(w, "  match %s.decode bytes with\n", base)
-	fmt.Fprintf(w, "  | .error e => .error (toString e)\n")
-	fmt.Fprintf(w, "  | .ok msg => (%s.validate msg).mapError toString\n\n", local)
+	fmt.Fprintf(w, "  %s.decodeThenValidate %s.decode %s.validate bytes\n\n", runtimeNS, base, local)
+
+	fmt.Fprintf(w, "/-- Soundness of decode-then-validate: success factors through a successful\n")
+	fmt.Fprintf(w, "decode and a successful validate. -/\n")
+	fmt.Fprintf(w, "theorem %s.decodeValid_sound {bytes : ByteArray} {%s : %s}\n", local, vName, local)
+	fmt.Fprintf(w, "    (%s : %s.decodeValid bytes = Except.ok %s) :\n", hName, local, vName)
+	fmt.Fprintf(w, "    ∃ %s, %s.decode bytes = Except.ok %s ∧ %s.validate %s = Except.ok %s :=\n",
+		bName, base, bName, local, bName, vName)
+	fmt.Fprintf(w, "  %s.decodeThenValidate_sound %s\n\n", runtimeNS, hName)
 	return nil
+}
+
+// wrapProof parenthesizes a proof term used in application position.
+func wrapProof(proof string) string {
+	if strings.ContainsRune(proof, ' ') && !strings.HasPrefix(proof, "⟨") && !strings.HasPrefix(proof, "(") {
+		return "(" + proof + ")"
+	}
+	return proof
+}
+
+// indentBlock re-indents a rendered block, keeping its first line unindented
+// (for insertion after an opening parenthesis).
+func indentBlock(block, indent string) string {
+	lines := strings.Split(strings.TrimRight(block, "\n"), "\n")
+	for i := 1; i < len(lines); i++ {
+		if lines[i] != "" {
+			lines[i] = indent + lines[i]
+		}
+	}
+	return strings.Join(lines, "\n")
 }
 
 // emitOneofSum generates the validated sum type for a constrained oneof: an
 // inductive whose constructors carry refined payloads, with case-wise
-// validate/toBase.
+// ValidPred/checkPred/ofPred/validate/toBase and the soundness/completeness
+// theorems.
 func (fg *fileGen) emitOneofSum(w *strings.Builder, m *protogen.Message, op *oneofPlan, ruleIdents map[string]bool) error {
 	fmt.Fprintf(w, "/-- Validated `%s.%s`: the oneof sum with refined constructor payloads. -/\n",
 		m.Desc.FullName(), op.protoName)
@@ -949,33 +1449,99 @@ func (fg *fileGen) emitOneofSum(w *strings.Builder, m *protogen.Message, op *one
 	for k := range ruleIdents {
 		taken[k] = true
 	}
-	bName := freshTaken("b", taken)
-	taken[bName] = true
+	for i := 0; i < 64; i++ {
+		taken[fmt.Sprintf("h%d", i)] = true
+	}
+	taken["h_z"] = true
+	bName := uniqueName("b", taken)
+	hName := uniqueName("h", taken)
+	hcName := uniqueName("hc", taken)
+	vName := uniqueName("v", taken)
 
-	fmt.Fprintf(w, "/-- Decide the member rules for the active case. -/\n")
-	fmt.Fprintf(w, "def %s.validate (%s : %s) : Except _root_.Protovalidate.Violation %s :=\n",
-		op.sumLocal, bName, op.baseSum, op.sumLocal)
-	fmt.Fprintf(w, "  match %s with\n", bName)
+	// ---- ValidPred -----------------------------------------------------------
+	fmt.Fprintf(w, "/-- Declarative validity of the active `%s.%s` case. -/\n", m.Desc.FullName(), op.protoName)
+	fmt.Fprintf(w, "def %s.ValidPred : %s → Prop\n", op.sumLocal, op.baseSum)
 	for _, mem := range op.members {
 		p := mem.plan
-		vName := freshTaken("v", taken)
 		switch {
 		case p.constrained():
-			fmt.Fprintf(w, "  | .%s %s =>\n", p.leanName, vName)
-			okOf := func(proof string) string {
-				return "Except.ok (." + p.leanName + " ⟨" + vName + ", " + proof + "⟩)"
-			}
-			if err := fg.validateChain(w, "    ", p, vName, p.protoName, okOf); err != nil {
-				return fmt.Errorf("oneof %s: %w", op.protoName, err)
-			}
+			fmt.Fprintf(w, "  | .%s %s => %s\n", p.leanName, p.subBinder, p.props[0])
 		case mem.nested != nil:
-			fmt.Fprintf(w, "  | .%s %s => (%s.validate %s).map (fun x => .%s x)\n",
-				p.leanName, vName, validQualified(mem.nested.msg), vName, p.leanName)
+			binder := freshTaken("x", ruleIdents)
+			fmt.Fprintf(w, "  | .%s %s => %s.ValidPred %s\n", p.leanName, binder, validQualified(mem.nested.msg), binder)
 		default:
-			fmt.Fprintf(w, "  | .%s %s => Except.ok (.%s %s)\n", p.leanName, vName, p.leanName, vName)
+			fmt.Fprintf(w, "  | .%s _ => True\n", p.leanName)
 		}
 	}
 	w.WriteString("\n")
+
+	// ---- checkPred -----------------------------------------------------------
+	fmt.Fprintf(w, "/-- Decide the member rules for the active case. -/\n")
+	fmt.Fprintf(w, "def %s.checkPred : (%s : %s) → %s.Decision (%s.ValidPred %s)\n",
+		op.sumLocal, bName, op.baseSum, runtimeNS, op.sumLocal, bName)
+	for _, mem := range op.members {
+		p := mem.plan
+		switch {
+		case p.constrained():
+			binder := p.subBinder
+			fmt.Fprintf(w, "  | .%s %s =>\n", p.leanName, binder)
+			okOf := func(proof string) string { return ".ok " + wrapProof(proof) }
+			conjOf := func(hc string) string { return hc }
+			if err := fg.decisionChain(w, "    ", p, binder, p.protoName, okOf, conjOf, hcName); err != nil {
+				return fmt.Errorf("oneof %s: %w", op.protoName, err)
+			}
+		case mem.nested != nil:
+			binder := freshTaken("x", ruleIdents)
+			fmt.Fprintf(w, "  | .%s %s => %s.checkPred %s\n",
+				p.leanName, binder, validQualified(mem.nested.msg), binder)
+		default:
+			fmt.Fprintf(w, "  | .%s _ => .ok True.intro\n", p.leanName)
+		}
+	}
+	w.WriteString("\n")
+
+	// ---- ofPred --------------------------------------------------------------
+	fmt.Fprintf(w, "/-- Construct the validated sum from a `ValidPred` proof. -/\n")
+	fmt.Fprintf(w, "def %s.ofPred : (%s : %s) → %s.ValidPred %s → %s\n",
+		op.sumLocal, bName, op.baseSum, op.sumLocal, bName, op.sumLocal)
+	for _, mem := range op.members {
+		p := mem.plan
+		switch {
+		case p.constrained():
+			fmt.Fprintf(w, "  | .%s %s, %s => .%s ⟨%s, %s⟩\n",
+				p.leanName, p.subBinder, hName, p.leanName, p.subBinder, hName)
+		case mem.nested != nil:
+			binder := freshTaken("x", ruleIdents)
+			fmt.Fprintf(w, "  | .%s %s, %s => .%s (%s.ofPred %s %s)\n",
+				p.leanName, binder, hName, p.leanName, validQualified(mem.nested.msg), binder, hName)
+		default:
+			binder := freshTaken("x", ruleIdents)
+			fmt.Fprintf(w, "  | .%s %s, _ => .%s %s\n", p.leanName, binder, p.leanName, binder)
+		}
+	}
+	w.WriteString("\n")
+
+	// ---- validate / Decidable / theorems ------------------------------------
+	fmt.Fprintf(w, "/-- Decide the member rules for the active case, producing the validated sum or the violation. -/\n")
+	fmt.Fprintf(w, "def %s.validate (%s : %s) : Except %s.Violation %s :=\n",
+		op.sumLocal, bName, op.baseSum, runtimeNS, op.sumLocal)
+	fmt.Fprintf(w, "  (%s.checkPred %s).toExcept (%s.ofPred %s)\n\n", op.sumLocal, bName, op.sumLocal, bName)
+
+	fmt.Fprintf(w, "instance %s.instDecidableValidPred : (%s : %s) → Decidable (%s.ValidPred %s) :=\n",
+		op.sumLocal, bName, op.baseSum, op.sumLocal, bName)
+	fmt.Fprintf(w, "  fun %s => (%s.checkPred %s).toDecidable\n\n", bName, op.sumLocal, bName)
+
+	fmt.Fprintf(w, "/-- Soundness: a successful `validate` certifies `ValidPred` on the input sum. -/\n")
+	fmt.Fprintf(w, "theorem %s.validate_sound {%s : %s} {%s : %s}\n", op.sumLocal, bName, op.baseSum, vName, op.sumLocal)
+	fmt.Fprintf(w, "    (%s : %s.validate %s = Except.ok %s) : %s.ValidPred %s :=\n",
+		hName, op.sumLocal, bName, vName, op.sumLocal, bName)
+	fmt.Fprintf(w, "  %s.Decision.pred_of_toExcept_ok %s\n\n", runtimeNS, hName)
+
+	fmt.Fprintf(w, "/-- Completeness: `ValidPred` guarantees `validate` succeeds. -/\n")
+	fmt.Fprintf(w, "theorem %s.validate_complete {%s : %s} (%s : %s.ValidPred %s) :\n",
+		op.sumLocal, bName, op.baseSum, hName, op.sumLocal, bName)
+	fmt.Fprintf(w, "    (%s.validate %s).isOk :=\n", op.sumLocal, bName)
+	fmt.Fprintf(w, "  %s.Decision.toExcept_isOk %s\n\n", runtimeNS, hName)
 
 	fmt.Fprintf(w, "/-- Forget the refinements. -/\n")
 	fmt.Fprintf(w, "def %s.toBase (v : %s) : %s :=\n", op.sumLocal, op.sumLocal, op.baseSum)
