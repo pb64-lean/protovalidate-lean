@@ -49,6 +49,40 @@ const (
 	precAtom  = 1024 // identifiers, literals, projections, bracketed forms
 )
 
+// guard is a pending error side-condition: cond must hold (as a hypothesis
+// named hyp, kept in scope for dependent uses like getElem proofs) for the
+// guarded fragment to be CEL-evaluable without error. Guards are discharged
+// as `if hyp : cond then … else False` at the translation points where CEL's
+// error semantics demand it (see translator.closeGuards).
+type guard struct {
+	hyp  string
+	cond string
+	// dependent guards bind a hypothesis the guarded text needs to elaborate
+	// (getElem proofs); they cannot be relocated. Non-dependent guards
+	// (arithmetic side-conditions) may be hoisted out of binder bodies as
+	// quantified definedness conditions.
+	dependent bool
+}
+
+// constKind is the CEL literal domain of a constant numeric expression.
+type constKind int
+
+const (
+	constInt constKind = iota
+	constUint
+	constDouble
+)
+
+// constNum marks a piece as a compile-time numeric constant (literals and
+// arithmetic over them). Constant arithmetic is range-checked in Go — the
+// emitted text stays a polymorphic literal expression — because an
+// ArithOk-guarded form over literals alone would have no type anchor.
+type constNum struct {
+	kind constKind
+	i    int64
+	u    uint64
+}
+
 // piece is a translated fragment of Lean syntax.
 type piece struct {
 	text string
@@ -57,6 +91,15 @@ type piece struct {
 	// boolLit is set for the CEL literals `true`/`false` so they can be
 	// rendered as the propositions True/False when a Prop is required.
 	boolLit *bool
+	// guards are pending error side-conditions (bounds, overflow) not yet
+	// discharged; they propagate to enclosing fragments.
+	guards []guard
+	// num is set for constant numeric expressions (Go-side range checking).
+	num *constNum
+	// noArithErr marks operands whose CEL arithmetic cannot error (string/
+	// bytes/list/map literals, folded timestamp/duration constants, now):
+	// arithmetic on them is emitted unguarded.
+	noArithErr bool
 }
 
 func atom(text string, k kind) piece { return piece{text: text, prec: precAtom, kind: k} }

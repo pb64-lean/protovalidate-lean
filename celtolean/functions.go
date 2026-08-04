@@ -51,18 +51,21 @@ func (t *translator) function(c ast.CallExpr) (piece, error) {
 		// presence delegates to the generated has_<field> predicate, which
 		// encodes CEL's per-category semantics (case test, isSome, non-empty,
 		// non-default). Intermediate path hops default-traverse as usual.
-		var op piece
-		var err error
-		if sel.Operand().Kind() == ast.SelectKind {
-			op, err = t.selectExpr(sel.Operand().AsSelect(), true)
-		} else {
-			op, err = t.expr(sel.Operand())
+		if opPath, ok := celPath(sel.Operand()); ok && t.pathAttrs[opPath] == PathMapSelect {
+			// has(m.key) on a map: CEL presence of the key.
+			op, err := t.selectOperand(sel, false)
+			if err != nil {
+				return piece{}, err
+			}
+			text := "(" + op.at(precApp+1) + "[" + leanString(sel.FieldName()) + "]?).isSome"
+			return piece{text: text, prec: precAtom, kind: kBool, guards: op.guards}, nil
 		}
+		op, err := t.selectOperand(sel, true)
 		if err != nil {
 			return piece{}, err
 		}
 		text := op.at(precApp+1) + "." + leanIdent("has_"+sel.FieldName())
-		return piece{text: text, prec: precAtom, kind: kBool}, nil
+		return piece{text: text, prec: precAtom, kind: kBool, guards: op.guards}, nil
 	}
 
 	// Normalize receiver style: size(e) ≡ e.size(), matches(s, re) ≡ s.matches(re),
@@ -92,22 +95,29 @@ func (t *translator) function(c ast.CallExpr) (piece, error) {
 		}
 	}
 
+	allGuards := func() []guard {
+		out := append([]guard{}, recv.guards...)
+		for _, a := range rest {
+			out = append(out, a.guards...)
+		}
+		return out
+	}
 	proj := func(field string, k kind) piece {
-		return piece{text: recv.at(precApp+1) + "." + field, prec: precAtom, kind: k}
+		return piece{text: recv.at(precApp+1) + "." + field, prec: precAtom, kind: k, guards: allGuards()}
 	}
 	dotApp := func(field string, k kind, args ...piece) piece {
 		parts := []string{recv.at(precApp+1) + "." + field}
 		for _, a := range args {
 			parts = append(parts, a.at(precApp+1))
 		}
-		return piece{text: strings.Join(parts, " "), prec: precApp, kind: k}
+		return piece{text: strings.Join(parts, " "), prec: precApp, kind: k, guards: allGuards()}
 	}
 	celApp := func(name string, k kind, args ...piece) piece {
 		parts := []string{"Cel." + name, recv.at(precApp + 1)}
 		for _, a := range args {
 			parts = append(parts, a.at(precApp+1))
 		}
-		return piece{text: strings.Join(parts, " "), prec: precApp, kind: k}
+		return piece{text: strings.Join(parts, " "), prec: precApp, kind: k, guards: allGuards()}
 	}
 
 	switch {
@@ -127,6 +137,21 @@ func (t *translator) function(c ast.CallExpr) (piece, error) {
 	case fn == "matches" && len(rest) == 1:
 		// RE2 matching has no Lean-core counterpart (and `matches` is a
 		// reserved Lean token); Cel.regexMatch is the designated shim.
+		// Literal patterns must be inside the subset the Lean engine accepts
+		// (RegexAccepted ports its grammar); anything outside would match
+		// nothing at runtime — unsound under negation. Accepted patterns are
+		// recorded so codegen can add a compile-time #guard backstop.
+		if lit, ok := stringLiteral(restArgs[0]); ok {
+			if err := RegexAccepted(lit); err != nil {
+				return piece{}, fmt.Errorf("regex %q is outside the supported RE2 subset: %v "+
+					"(the pure-Lean engine supports literals, classes, escapes, anchors, alternation, "+
+					"groups, and quantifiers with bounds ≤ 512; no flags, backreferences, \\b, or named classes)", lit, err)
+			}
+			t.regexes[lit] = true
+		} else {
+			t.warn("non-literal regex pattern: a pattern outside the supported subset matches nothing at runtime " +
+				"(unsound under negation); prefer literal patterns, which are checked at generation time")
+		}
 		return celApp("regexMatch", kBool, rest[0]), nil
 
 	// -- Type conversions ----------------------------------------------------
@@ -139,7 +164,7 @@ func (t *translator) function(c ast.CallExpr) (piece, error) {
 	case fn == "bool" && len(rest) == 0:
 		return celApp("toBool", kBool), nil
 	case fn == "string" && len(rest) == 0:
-		return piece{text: "toString " + recv.at(precApp+1), prec: precApp, kind: kTerm}, nil
+		return piece{text: "toString " + recv.at(precApp+1), prec: precApp, kind: kTerm, guards: recv.guards, noArithErr: true}, nil
 	case fn == "bytes" && len(rest) == 0:
 		return proj("toUTF8", kTerm), nil
 	case fn == "dyn" && len(rest) == 0:
@@ -151,13 +176,17 @@ func (t *translator) function(c ast.CallExpr) (piece, error) {
 			return foldTimestamp(lit)
 		}
 		t.warn("non-literal timestamp() argument: Cel.timestamp parses at evaluation time (invalid strings map to the zero timestamp)")
-		return celApp("timestamp", kTerm), nil
+		p := celApp("timestamp", kTerm)
+		p.noArithErr = true // the time model's arithmetic is total
+		return p, nil
 	case fn == "duration" && len(rest) == 0:
 		if lit, ok := stringLiteral(recvExpr); ok {
 			return foldDuration(lit)
 		}
 		t.warn("non-literal duration() argument: Cel.duration parses at evaluation time (invalid strings map to the zero duration)")
-		return celApp("duration", kTerm), nil
+		p := celApp("duration", kTerm)
+		p.noArithErr = true
+		return p, nil
 
 	// -- protovalidate extensions ---------------------------------------------
 	case fn == "unique" && len(rest) == 0:
@@ -222,7 +251,7 @@ func foldTimestamp(lit string) (piece, error) {
 		return piece{}, fmt.Errorf("invalid timestamp literal %q: %w", lit, err)
 	}
 	text := "Cel.Timestamp.mk " + leanIntArg(ts.Unix()) + " " + leanIntArg(int64(ts.Nanosecond()))
-	return piece{text: text, prec: precApp, kind: kTerm}, nil
+	return piece{text: text, prec: precApp, kind: kTerm, noArithErr: true}, nil
 }
 
 func foldDuration(lit string) (piece, error) {
@@ -234,7 +263,7 @@ func foldDuration(lit string) (piece, error) {
 	secs := int64(d / time.Second)
 	nanos := int64(d % time.Second)
 	text := "Cel.Duration.mk " + leanIntArg(secs) + " " + leanIntArg(nanos)
-	return piece{text: text, prec: precApp, kind: kTerm}, nil
+	return piece{text: text, prec: precApp, kind: kTerm, noArithErr: true}, nil
 }
 
 func (t *translator) unsupported(fn string) error {
@@ -291,6 +320,30 @@ func (t *translator) macro(fn string, c ast.CallExpr) (piece, error) {
 		}
 		return adapt(p), nil
 	}
+	// hoistBodyGuards relocates a lambda body's pending guards. Dependent
+	// guards (getElem proofs) cannot leave the body — error. Arithmetic
+	// side-conditions hoist to one quantified definedness guard over the
+	// receiver: CEL's non-absorbing comprehensions (map/filter/exists_one)
+	// error when any element's body errors, so demanding every element's
+	// side-conditions matches error ⇒ fail (conservative only for the
+	// filtered map form, where CEL skips transforms of filtered-out
+	// elements).
+	hoistBodyGuards := func(p piece) (piece, []guard, error) {
+		if len(p.guards) == 0 {
+			return p, nil, nil
+		}
+		conds := make([]string, 0, len(p.guards))
+		for _, g := range p.guards {
+			if g.dependent {
+				return piece{}, nil, fmt.Errorf("indexing with CEL error semantics inside a %s() body is not supported; "+
+					"restructure the rule (e.g. hoist the indexed access out of the %s body)", fn, fn)
+			}
+			conds = append(conds, g.cond)
+		}
+		p.guards = nil
+		hoisted := t.newGuard("(∀ " + leanIdent(emitted) + " ∈ " + recv.at(precCmp+1) + ", " + strings.Join(conds, " ∧ ") + ")")
+		return p, []guard{hoisted}, nil
+	}
 	lambda := func(p piece) string { return "(fun " + leanIdent(emitted) + " => " + p.text + ")" }
 
 	switch fn {
@@ -299,28 +352,57 @@ func (t *translator) macro(fn string, c ast.CallExpr) (piece, error) {
 		if err != nil {
 			return piece{}, err
 		}
+		// Per-element error semantics: discharging the body's guards inside
+		// the binder matches CEL exactly (an element whose body errors makes
+		// all() unsatisfied / cannot witness exists()). Under a negation
+		// that placement would be unsound; hoist what can be hoisted and
+		// reject the rest.
+		p = t.closeGuardsPositive(p)
+		p, hoisted, err := hoistBodyGuards(p)
+		if err != nil {
+			return piece{}, fmt.Errorf("%v (the %s occurs under a negation)", err, fn)
+		}
 		q := "∀"
 		if fn == "exists" {
 			q = "∃"
 		}
 		return piece{
-			text: q + " " + leanIdent(emitted) + " ∈ " + recv.at(precCmp+1) + ", " + p.text,
-			prec: precLow,
-			kind: kProp,
+			text:   q + " " + leanIdent(emitted) + " ∈ " + recv.at(precCmp+1) + ", " + p.text,
+			prec:   precLow,
+			kind:   kProp,
+			guards: append(append([]guard{}, recv.guards...), hoisted...),
 		}, nil
 	case "exists_one", "existsOne":
 		p, err := body(args[1], t.boolify)
 		if err != nil {
 			return piece{}, err
 		}
-		countP := piece{text: recv.at(precApp+1) + ".countP " + lambda(p), prec: precApp, kind: kTerm}
+		p, hoisted, err := hoistBodyGuards(p)
+		if err != nil {
+			return piece{}, err
+		}
+		countP := piece{
+			text:   recv.at(precApp+1) + ".countP " + lambda(p),
+			prec:   precApp,
+			kind:   kTerm,
+			guards: append(append([]guard{}, recv.guards...), hoisted...),
+		}
 		return t.binary(cmpOp("="), countP, atom("1", kTerm)), nil
 	case "filter":
 		p, err := body(args[1], t.boolify)
 		if err != nil {
 			return piece{}, err
 		}
-		return piece{text: recv.at(precApp+1) + ".filter " + lambda(p), prec: precApp, kind: kTerm}, nil
+		p, hoisted, err := hoistBodyGuards(p)
+		if err != nil {
+			return piece{}, err
+		}
+		return piece{
+			text:   recv.at(precApp+1) + ".filter " + lambda(p),
+			prec:   precApp,
+			kind:   kTerm,
+			guards: append(append([]guard{}, recv.guards...), hoisted...),
+		}, nil
 	case "map":
 		if len(args) == 3 {
 			pred, err := body(args[1], t.boolify)
@@ -331,14 +413,33 @@ func (t *translator) macro(fn string, c ast.CallExpr) (piece, error) {
 			if err != nil {
 				return piece{}, err
 			}
+			pred, hoistedP, err := hoistBodyGuards(pred)
+			if err != nil {
+				return piece{}, err
+			}
+			mapped, hoistedM, err := hoistBodyGuards(mapped)
+			if err != nil {
+				return piece{}, err
+			}
 			filtered := piece{text: recv.at(precApp+1) + ".filter " + lambda(pred), prec: precApp, kind: kTerm}
-			return piece{text: filtered.at(precApp+1) + ".map " + lambda(mapped), prec: precApp, kind: kTerm}, nil
+			guards := append(append([]guard{}, recv.guards...), hoistedP...)
+			guards = append(guards, hoistedM...)
+			return piece{text: filtered.at(precApp+1) + ".map " + lambda(mapped), prec: precApp, kind: kTerm, guards: guards}, nil
 		}
 		mapped, err := body(args[1], func(p piece) piece { return p })
 		if err != nil {
 			return piece{}, err
 		}
-		return piece{text: recv.at(precApp+1) + ".map " + lambda(mapped), prec: precApp, kind: kTerm}, nil
+		mapped, hoisted, err := hoistBodyGuards(mapped)
+		if err != nil {
+			return piece{}, err
+		}
+		return piece{
+			text:   recv.at(precApp+1) + ".map " + lambda(mapped),
+			prec:   precApp,
+			kind:   kTerm,
+			guards: append(append([]guard{}, recv.guards...), hoisted...),
+		}, nil
 	}
 	return piece{}, t.unsupported(fn)
 }

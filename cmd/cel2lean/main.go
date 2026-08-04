@@ -171,6 +171,11 @@ func runBatch(path, namespace, varName, imports string, out io.Writer) error {
 		if !nodec {
 			fmt.Fprintf(w, "example (%s : %s) : Decidable (%s %s) := inferInstance\n", res.Var, leanType, name, res.Var)
 		}
+		for _, re := range res.Regexes {
+			// Acceptance backstop: the Lean engine must accept every literal
+			// pattern the Go gate accepted, or the build fails here.
+			fmt.Fprintf(w, "#guard Cel.Regex.accepts %s\n", celtolean.LeanString(re))
+		}
 	}
 	if err := scanner.Err(); err != nil {
 		return err

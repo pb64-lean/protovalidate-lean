@@ -29,9 +29,15 @@ int32_neg_bounds	Int32	-	-1 <= this && this <= 1
 int32_in	Int32	-	this in [1, 2, 3]
 int64_hex	Int64	-	this == 0x7B
 int64_arith	Int64	-	this * 2 + 1 <= 100
+int64_arith_boundary	Int64	-	this + 1 <= 9223372036854775807
+int64_neg_guard	Int64	-	-this != 1
+int64_const_fold	Int64	-	this == 2 + 3 * 4
+int32_arith_guard	Int32	-	this * 100 <= 1000000
 int64_to_string	Int64	-	string(this) == '42'
 uint64_nonzero	UInt64	-	this != 0u
+uint64_sub_guard	UInt64	-	this - 1u < 100u
 uint32_range	UInt32	-	this >= 1u && this < 4294967295u
+str_size_arith	String	-	this.size() - 1 <= 10
 
 # -- floats -------------------------------------------------------------------
 float_range	Float	-	this >= 0.0 && this <= 1.0
@@ -61,6 +67,9 @@ rep_map_eq	Array Int32	-	this.map(v, v * 2) == [2, 4]
 rep_map_filter	Array Int32	-	this.map(v, v > 0, v * 2).size() > 0
 rep_map_exists	Array String	-	this.map(s, s.size()).exists(n, n > 10)
 rep_index	Array Int32	-	this[0] > 5
+rep_index_negated	Array Int32	-	!(this[0] > 5)
+rep_index_absorbed	Array Int32	-	this[0] > 5 || this.size() == 0
+rep_index_nested	Array Int32	-	this[this.size() - 1] >= 0
 rep_str_all	Array String	-	this.all(s, s.startsWith('a') && s.size() < 9)
 rep_shadow	Array String	-	this.all(x, x.size() < this.size())
 rep_concat	Array Int32	-	this + [1] == [2, 1]

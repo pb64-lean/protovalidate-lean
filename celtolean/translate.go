@@ -30,6 +30,7 @@ package celtolean
 import (
 	"errors"
 	"fmt"
+	"math"
 	"sort"
 	"strconv"
 	"strings"
@@ -60,7 +61,28 @@ type Options struct {
 	// bindings. Selecting a field absent from the map is an error, as is any
 	// other use of `this`.
 	ThisFields map[string]ThisField
+
+	// PathAttrs supplies proto-descriptor knowledge for select paths rooted
+	// at `this` (dotted CEL paths, "" denoting `this` itself), letting the
+	// otherwise type-free translation handle constructs whose Lean rendering
+	// depends on the proto type: enum-typed values (CEL treats them as ints;
+	// the generated inductive needs its `.toInt32` view) and map selection
+	// sugar (`m.key`, which must become guarded indexing).
+	PathAttrs map[string]PathAttr
 }
+
+// PathAttr classifies a select path for PathAttrs.
+type PathAttr int
+
+const (
+	// PathEnumInt marks an enum-typed value: the emitted text gains the
+	// generated enum's `.toInt32` view, matching CEL's enum-as-int semantics.
+	PathEnumInt PathAttr = iota + 1
+	// PathMapSelect marks a map-typed value: CEL selection sugar on it
+	// (`m.key`) is emitted as guarded indexing `m["key"]` (CEL errors on a
+	// missing key, so the guard makes the proposition false).
+	PathMapSelect
+)
 
 // ThisField describes how a message field is reachable in ThisFields mode.
 type ThisField struct {
@@ -88,6 +110,11 @@ type Result struct {
 	// callers embedding the text as an operand (e.g. conjoining several rule
 	// translations with ∧) parenthesize when Prec is below the slot minimum.
 	Prec int `json:"prec"`
+	// Regexes lists the literal regex patterns occurring in the expression
+	// (each already vetted by RegexAccepted); codegen emits a compile-time
+	// `#guard Cel.Regex.accepts "..."` per pattern so the Lean build fails if
+	// the runtime engine would not accept it.
+	Regexes []string `json:"regexes,omitempty"`
 	// Warnings notes semantic caveats of the translation (presence semantics
 	// of has(), time-dependence of now, placeholder timestamp types, ...).
 	Warnings []string `json:"warnings,omitempty"`
@@ -114,16 +141,31 @@ func Translate(cel string, opts Options) (*Result, error) {
 		varName:    varName,
 		varRoot:    strings.SplitN(varName, ".", 2)[0],
 		thisFields: opts.ThisFields,
+		pathAttrs:  opts.PathAttrs,
 		used:       used,
 		bound:      map[string][]string{},
 		warned:     map[string]bool{},
+		regexes:    map[string]bool{},
 	}
 	p, err := t.expr(root)
 	if err != nil {
 		return nil, err
 	}
+	if len(p.guards) > 0 {
+		if p.kind == kTerm {
+			return nil, errors.New("expression with indexing/arithmetic guards must be boolean-valued")
+		}
+		// Remaining guards close at the root: a CEL evaluation error anywhere
+		// they cover makes the whole rule unsatisfied.
+		p = t.closeGuards(p)
+	}
 	sort.Strings(t.warnings)
-	return &Result{Lean: p.text, Var: t.varName, Kind: p.kind.String(), Prec: p.prec, Warnings: t.warnings}, nil
+	regexes := make([]string, 0, len(t.regexes))
+	for re := range t.regexes {
+		regexes = append(regexes, re)
+	}
+	sort.Strings(regexes)
+	return &Result{Lean: p.text, Var: t.varName, Kind: p.kind.String(), Prec: p.prec, Regexes: regexes, Warnings: t.warnings}, nil
 }
 
 // freshName returns base if unused, else the first unused base_1, base_2, ...
@@ -191,6 +233,7 @@ type translator struct {
 	varName    string
 	varRoot    string               // first component of varName (capture avoidance)
 	thisFields map[string]ThisField // non-nil: message/struct-field mode
+	pathAttrs  map[string]PathAttr  // proto typing knowledge for `this` paths
 	used       map[string]bool      // identifiers occurring in the expression
 	// bound maps a CEL comprehension variable in scope to the Lean name it is
 	// emitted as (renamed when it would capture varRoot); a stack per name
@@ -198,6 +241,12 @@ type translator struct {
 	bound    map[string][]string
 	warnings []string
 	warned   map[string]bool
+	regexes  map[string]bool // literal regex patterns (for #guard emission)
+	// negDepth > 0 inside error-strict, non-monotone contexts (under !, an
+	// (in)equality of propositions, ...): guard-closing at ∧/∨ operands and
+	// ternary branches is disabled there — guards float outward instead — so
+	// a CEL evaluation error can never be absorbed by a surrounding negation.
+	negDepth int
 }
 
 func (t *translator) warn(msg string) {
@@ -205,6 +254,49 @@ func (t *translator) warn(msg string) {
 		t.warned[msg] = true
 		t.warnings = append(t.warnings, msg)
 	}
+}
+
+// newGuard allocates an error-guard with a fresh hypothesis name.
+func (t *translator) newGuard(cond string) guard {
+	hyp := freshName("h", t.used)
+	t.used[hyp] = true
+	return guard{hyp: hyp, cond: cond}
+}
+
+// closeGuards discharges a fragment's pending guards as nested dependent
+// if-then-else: `(if h : g₁ then … P … else False)`. The guarded proposition
+// is False whenever CEL evaluation of the covered subterms would error
+// (out-of-range index, missing map key, arithmetic overflow) — matching
+// CEL's error ⇒ rule-not-satisfied — and equals P exactly otherwise. The
+// hypotheses stay in scope for the guarded text (getElem proofs).
+func (t *translator) closeGuards(p piece) piece {
+	if len(p.guards) == 0 {
+		return p
+	}
+	text := t.liftProp(p).text
+	for i := len(p.guards) - 1; i >= 0; i-- {
+		g := p.guards[i]
+		text = "if " + g.hyp + " : " + g.cond + " then " + text + " else False"
+	}
+	return piece{text: "(" + text + ")", prec: precAtom, kind: kProp}
+}
+
+// closeGuardsPositive discharges guards only in positive polarity; in
+// non-monotone contexts they float to an enclosing positive position (at the
+// latest, the root).
+func (t *translator) closeGuardsPositive(p piece) piece {
+	if t.negDepth > 0 {
+		return p
+	}
+	return t.closeGuards(p)
+}
+
+func mergeGuards(ps ...piece) []guard {
+	var out []guard
+	for _, p := range ps {
+		out = append(out, p.guards...)
+	}
+	return out
 }
 
 // liftProp adapts a fragment for a position that requires a Prop. Bool
@@ -227,7 +319,7 @@ func (t *translator) liftProp(p piece) piece {
 // are Decidable).
 func (t *translator) boolify(p piece) piece {
 	if p.kind == kProp {
-		return piece{text: "decide " + p.at(precApp+1), prec: precApp, kind: kBool}
+		return piece{text: "decide " + p.at(precApp+1), prec: precApp, kind: kBool, guards: p.guards}
 	}
 	return p
 }
@@ -261,15 +353,31 @@ func (t *translator) literal(e ast.Expr) (piece, error) {
 		b := bool(v)
 		return piece{text: strconv.FormatBool(b), prec: precAtom, kind: kBool, boolLit: &b}, nil
 	case types.Int:
-		return atom(strconv.FormatInt(int64(v), 10), kTerm), nil
+		p := atom(strconv.FormatInt(int64(v), 10), kTerm)
+		if int64(v) < 0 {
+			p.prec = precNeg // "-1" needs parens in argument position
+		}
+		p.num = &constNum{kind: constInt, i: int64(v)}
+		return p, nil
 	case types.Uint:
-		return atom(strconv.FormatUint(uint64(v), 10), kTerm), nil
+		p := atom(strconv.FormatUint(uint64(v), 10), kTerm)
+		p.num = &constNum{kind: constUint, u: uint64(v)}
+		return p, nil
 	case types.Double:
-		return atom(leanFloat(float64(v)), kTerm), nil
+		p := atom(leanFloat(float64(v)), kTerm)
+		if float64(v) < 0 {
+			p.prec = precNeg
+		}
+		p.num = &constNum{kind: constDouble}
+		return p, nil
 	case types.String:
-		return atom(leanString(string(v)), kTerm), nil
+		p := atom(leanString(string(v)), kTerm)
+		p.noArithErr = true // string concat cannot error
+		return p, nil
 	case types.Bytes:
-		return leanBytes([]byte(v)), nil
+		p := leanBytes([]byte(v))
+		p.noArithErr = true
+		return p, nil
 	case types.Null:
 		return atom("none", kTerm), nil
 	default:
@@ -283,21 +391,51 @@ func (t *translator) ident(name string) (piece, error) {
 		if t.thisFields != nil {
 			return piece{}, errors.New("in message-field mode `this` may only appear as a field selection (this.field)")
 		}
+		var p piece
 		if strings.Contains(t.varName, ".") {
 			// Pre-rendered projection like "b.name": atomic, emitted verbatim.
-			return atom(t.varName, kTerm), nil
+			p = atom(t.varName, kTerm)
+		} else {
+			p = atom(leanIdent(t.varName), kTerm)
 		}
-		return atom(leanIdent(t.varName), kTerm), nil
+		if t.pathAttrs[""] == PathEnumInt {
+			// Enum-typed `this`: CEL compares enums as ints; use the
+			// generated inductive's integer view.
+			p = atom(p.text+".toInt32", kTerm)
+		}
+		return p, nil
 	case len(t.bound[name]) > 0:
 		return atom(leanIdent(t.bound[name][len(t.bound[name])-1]), kTerm), nil
 	case name == "now":
 		t.warn("`now` maps to Cel.now: the refinement becomes evaluation-time dependent; " +
 			"consider keeping such constraints outside the subtype")
-		return atom("Cel.now", kTerm), nil
+		p := atom("Cel.now", kTerm)
+		p.noArithErr = true // the time model's arithmetic is total
+		return p, nil
 	default:
 		t.warn(fmt.Sprintf("free identifier %q kept verbatim; it must resolve in the Lean context of the generated code", name))
 		return atom(leanIdent(name), kTerm), nil
 	}
+}
+
+// celPath renders the dotted CEL path of a select chain rooted at `this`
+// ("" for `this` itself); ok is false for other shapes.
+func celPath(e ast.Expr) (string, bool) {
+	switch e.Kind() {
+	case ast.IdentKind:
+		if e.AsIdent() == "this" {
+			return "", true
+		}
+	case ast.SelectKind:
+		s := e.AsSelect()
+		if p, ok := celPath(s.Operand()); ok {
+			if p == "" {
+				return s.FieldName(), true
+			}
+			return p + "." + s.FieldName(), true
+		}
+	}
+	return "", false
 }
 
 // selectExpr renders a field selection. deeper marks selections whose result
@@ -307,7 +445,28 @@ func (t *translator) ident(name string) (piece, error) {
 // select the getter — giving chains CEL's default-instance traversal
 // semantics (`this.a.b.c` → `x.aD.bD.c`).
 func (t *translator) selectExpr(sel ast.SelectExpr, deeper bool) (piece, error) {
-	var text string
+	operandPath, onPath := celPath(sel.Operand())
+	ownPath := ""
+	if onPath {
+		if operandPath == "" {
+			ownPath = sel.FieldName()
+		} else {
+			ownPath = operandPath + "." + sel.FieldName()
+		}
+	}
+
+	// Map selection sugar: `m.key` on a map-typed operand is CEL for
+	// `m['key']` — emit guarded indexing (a missing key is a CEL error).
+	if onPath && t.pathAttrs[operandPath] == PathMapSelect {
+		op, err := t.selectOperand(sel, false)
+		if err != nil {
+			return piece{}, err
+		}
+		p := t.guardedIndex(op, leanString(sel.FieldName()))
+		return t.applyPathAttr(p, ownPath), nil
+	}
+
+	var p piece
 	if t.thisFields != nil && sel.Operand().Kind() == ast.IdentKind && sel.Operand().AsIdent() == "this" {
 		// Head of a message-rule path: the mapped text is already the field's
 		// base-typed CEL value, so no getter applies regardless of depth.
@@ -318,15 +477,9 @@ func (t *translator) selectExpr(sel ast.SelectExpr, deeper bool) (piece, error) 
 		if mapped.Text == "" {
 			return piece{}, fmt.Errorf("message rule accesses the value of field %q, which has no direct Lean counterpart (oneof member); only has(this.%s) is supported", sel.FieldName(), sel.FieldName())
 		}
-		text = mapped.Text
+		p = piece{text: mapped.Text, prec: precAtom, kind: kTerm}
 	} else {
-		var op piece
-		var err error
-		if sel.Operand().Kind() == ast.SelectKind {
-			op, err = t.selectExpr(sel.Operand().AsSelect(), true)
-		} else {
-			op, err = t.expr(sel.Operand())
-		}
+		op, err := t.selectOperand(sel, true)
 		if err != nil {
 			return piece{}, err
 		}
@@ -334,37 +487,77 @@ func (t *translator) selectExpr(sel ast.SelectExpr, deeper bool) (piece, error) 
 		if deeper {
 			field += "D"
 		}
-		text = op.at(precApp+1) + "." + leanIdent(field)
+		p = piece{text: op.at(precApp+1) + "." + leanIdent(field), prec: precAtom, kind: kTerm, guards: op.guards}
 	}
+	p = t.applyPathAttr(p, ownPath)
 	if sel.IsTestOnly() {
 		// Unreachable with macros disabled, but translate faithfully.
-		return t.presence(piece{text: text, prec: precAtom, kind: kTerm}), nil
+		return t.presence(p), nil
 	}
-	return piece{text: text, prec: precAtom, kind: kTerm}, nil
+	return p, nil
+}
+
+// selectOperand translates the operand of a field selection (recursing with
+// the intermediate-hop getter convention when it is itself a selection).
+func (t *translator) selectOperand(sel ast.SelectExpr, deeper bool) (piece, error) {
+	if sel.Operand().Kind() == ast.SelectKind {
+		return t.selectExpr(sel.Operand().AsSelect(), deeper)
+	}
+	return t.expr(sel.Operand())
+}
+
+// applyPathAttr rewrites a rendered path value per its proto-derived
+// attribute (currently the enum integer view).
+func (t *translator) applyPathAttr(p piece, path string) piece {
+	if path == "" || t.pathAttrs[path] != PathEnumInt {
+		return p
+	}
+	return piece{text: p.at(precApp+1) + ".toInt32", prec: precAtom, kind: kTerm, guards: p.guards}
+}
+
+// guardedIndex renders indexing with CEL's error semantics: the element via
+// `getElem?`/`Option.get` under a pending isSome guard, so an out-of-range
+// index or missing key falsifies the enclosing guarded proposition.
+func (t *translator) guardedIndex(recv piece, idxText string) piece {
+	optText := "(" + recv.at(precApp+1) + "[" + idxText + "]?)"
+	g := t.newGuard(optText + ".isSome")
+	g.dependent = true
+	return piece{
+		text:   optText + ".get " + g.hyp,
+		prec:   precApp,
+		kind:   kTerm,
+		guards: append(append([]guard{}, recv.guards...), g),
+	}
 }
 
 func (t *translator) presence(fieldSel piece) piece {
 	t.warn("has(...) maps to Option.isSome: valid for explicit-presence fields (optional/message/oneof member); " +
 		"CEL defines different presence semantics for repeated/map/implicit-presence fields")
-	return piece{text: fieldSel.at(precApp+1) + ".isSome", prec: precAtom, kind: kBool}
+	return piece{text: fieldSel.at(precApp+1) + ".isSome", prec: precAtom, kind: kBool, guards: fieldSel.guards}
 }
 
 func (t *translator) list(l ast.ListExpr) (piece, error) {
 	// Emit Array literals: grpc-lean maps repeated fields to Array, so
 	// list-typed comparisons and memberships line up.
 	parts := make([]string, 0, len(l.Elements()))
+	var guards []guard
 	for _, el := range l.Elements() {
 		p, err := t.expr(el)
 		if err != nil {
 			return piece{}, err
 		}
 		parts = append(parts, p.text)
+		guards = append(guards, p.guards...)
 	}
-	return atom("#["+strings.Join(parts, ", ")+"]", kTerm), nil
+	out := atom("#["+strings.Join(parts, ", ")+"]", kTerm)
+	out.guards = guards
+	out.noArithErr = true // list concatenation cannot error
+	return out, nil
 }
 
 func (t *translator) mapLit(m ast.MapExpr) (piece, error) {
 	parts := make([]string, 0, len(m.Entries()))
+	var guards []guard
 	for _, entry := range m.Entries() {
 		me := entry.AsMapEntry()
 		k, err := t.expr(me.Key())
@@ -376,11 +569,15 @@ func (t *translator) mapLit(m ast.MapExpr) (piece, error) {
 			return piece{}, err
 		}
 		parts = append(parts, "("+k.text+", "+v.text+")")
+		guards = append(guards, k.guards...)
+		guards = append(guards, v.guards...)
 	}
 	return piece{
-		text: "Std.HashMap.ofList [" + strings.Join(parts, ", ") + "]",
-		prec: precApp,
-		kind: kTerm,
+		text:       "Std.HashMap.ofList [" + strings.Join(parts, ", ") + "]",
+		prec:       precApp,
+		kind:       kTerm,
+		guards:     guards,
+		noArithErr: true,
 	}, nil
 }
 
@@ -417,9 +614,10 @@ func (t *translator) binary(op binOp, l, r piece) piece {
 		l, r = op.operand(t, l), op.operand(t, r)
 	}
 	return piece{
-		text: l.at(op.leftMin) + " " + op.symbol + " " + r.at(op.rightMin),
-		prec: op.prec,
-		kind: op.result,
+		text:   l.at(op.leftMin) + " " + op.symbol + " " + r.at(op.rightMin),
+		prec:   op.prec,
+		kind:   op.result,
+		guards: mergeGuards(l, r),
 	}
 }
 
@@ -443,16 +641,23 @@ func (t *translator) logicalChain(fn string, op binOp, c ast.CallExpr) (piece, e
 	flatten(fn, c.Args()[0], &operands)
 	flatten(fn, c.Args()[1], &operands)
 	parts := make([]string, 0, len(operands))
+	var guards []guard
 	for _, o := range operands {
 		p, err := t.expr(o)
 		if err != nil {
 			return piece{}, err
 		}
+		// CEL's &&/|| absorb evaluation errors of one operand when the other
+		// decides the result; discharging each operand's guards inside its
+		// own conjunct/disjunct reproduces exactly that (in positive
+		// polarity — under a negation the guards float outward instead).
+		p = t.closeGuardsPositive(p)
+		guards = append(guards, p.guards...)
 		// leftMin is the stricter side; using it for every operand of the
 		// chain is safe for an associative operator.
 		parts = append(parts, t.liftProp(p).at(op.leftMin))
 	}
-	return piece{text: strings.Join(parts, " "+op.symbol+" "), prec: op.prec, kind: kProp}, nil
+	return piece{text: strings.Join(parts, " "+op.symbol+" "), prec: op.prec, kind: kProp, guards: guards}, nil
 }
 
 func (t *translator) call(c ast.CallExpr) (piece, error) {
@@ -465,18 +670,20 @@ func (t *translator) call(c ast.CallExpr) (piece, error) {
 	case operators.LogicalOr:
 		return t.logicalChain(fn, opOr, c)
 	case operators.LogicalNot:
+		// CEL `!` is error-strict: an evaluation error inside the operand
+		// must fail the rule, so guard-closing is disabled underneath and
+		// the guards close outside the negation.
+		t.negDepth++
 		p, err := t.expr(args[0])
+		t.negDepth--
 		if err != nil {
 			return piece{}, err
 		}
+		guards := p.guards
 		p = t.liftProp(p)
-		return piece{text: "¬" + p.at(precNot), prec: precNot, kind: kProp}, nil
+		return piece{text: "¬" + p.at(precNot), prec: precNot, kind: kProp, guards: guards}, nil
 	case operators.Negate:
-		p, err := t.expr(args[0])
-		if err != nil {
-			return piece{}, err
-		}
-		return piece{text: "-" + p.at(precNeg), prec: precNeg, kind: kTerm}, nil
+		return t.negate(args[0])
 	case operators.Equals, operators.NotEquals:
 		return t.equality(fn, args)
 	case operators.Less:
@@ -490,11 +697,11 @@ func (t *translator) call(c ast.CallExpr) (piece, error) {
 	case operators.In, operators.OldIn:
 		return t.binaryArgs(cmpOp("∈"), args)
 	case operators.Add:
-		return t.binaryArgs(arithOp("+"), args)
+		return t.arith(arithOp("+"), "addOk", args)
 	case operators.Subtract:
-		return t.binaryArgs(arithOp("-"), args)
+		return t.arith(arithOp("-"), "subOk", args)
 	case operators.Multiply:
-		return t.binaryArgs(arithOp("*"), args)
+		return t.arith(arithOp("*"), "mulOk", args)
 	case operators.Divide:
 		return t.binaryArgs(arithOp("/"), args)
 	case operators.Modulo:
@@ -522,10 +729,13 @@ func (t *translator) binaryArgs(op binOp, args []ast.Expr) (piece, error) {
 	return t.binary(op, l, r), nil
 }
 
-// equality renders ==/!=. When an operand is itself a proposition (e.g. the
-// CEL bool-of-bools `(a == b) == c`), propositional equality would not
-// type-check against a Bool operand, so ↔ is used instead.
-func (t *translator) equality(fn string, args []ast.Expr) (piece, error) {
+// arith renders +/-/* with CEL's overflow-error semantics: constant operands
+// fold and range-check in Go; otherwise a Cel.addOk/subOk/mulOk guard is
+// attached, so an evaluation that would overflow in CEL falsifies the guarded
+// proposition. Operands that cannot produce arithmetic errors (string/bytes/
+// list/map literals, timestamp/duration constants, now) skip the guard —
+// concatenation and the time model are total.
+func (t *translator) arith(op binOp, okFn string, args []ast.Expr) (piece, error) {
 	l, err := t.expr(args[0])
 	if err != nil {
 		return piece{}, err
@@ -534,11 +744,130 @@ func (t *translator) equality(fn string, args []ast.Expr) (piece, error) {
 	if err != nil {
 		return piece{}, err
 	}
+	out := t.binary(op, l, r)
+	switch {
+	case l.num != nil && r.num != nil:
+		// Constant arithmetic: range-check the folded value here (there is
+		// no typed operand to anchor an ArithOk guard). Mixed const domains
+		// are a CEL type error; leave those for the checker downstream.
+		num, err := foldConstArith(op.symbol, l.num, r.num)
+		if err != nil {
+			return piece{}, fmt.Errorf("%v in %q", err, l.text+" "+op.symbol+" "+r.text)
+		}
+		out.num = num
+	case l.noArithErr || r.noArithErr:
+		out.noArithErr = true
+	default:
+		g := t.newGuard("Cel." + okFn + " " + l.at(precApp+1) + " " + r.at(precApp+1))
+		out.guards = append(out.guards, g)
+	}
+	return out, nil
+}
+
+// foldConstArith evaluates constant integer/uint arithmetic in the CEL
+// domain, rejecting overflow at generation time (CEL would error on every
+// evaluation, so the rule could never be satisfied). Doubles never error.
+func foldConstArith(symbol string, l, r *constNum) (*constNum, error) {
+	if l.kind != r.kind {
+		return nil, nil // mixed domains: a CEL type error, not our problem
+	}
+	switch l.kind {
+	case constDouble:
+		return &constNum{kind: constDouble}, nil
+	case constInt:
+		var v int64
+		var ok bool
+		switch symbol {
+		case "+":
+			v = l.i + r.i
+			ok = (r.i >= 0) == (v >= l.i)
+		case "-":
+			v = l.i - r.i
+			ok = (r.i >= 0) == (v <= l.i)
+		case "*":
+			v = l.i * r.i
+			ok = l.i == 0 ||
+				((l.i != -1 || r.i != math.MinInt64) && (r.i != -1 || l.i != math.MinInt64) && v/l.i == r.i)
+		}
+		if !ok {
+			return nil, errors.New("constant arithmetic overflows int64 (CEL errors on every evaluation)")
+		}
+		return &constNum{kind: constInt, i: v}, nil
+	case constUint:
+		var v uint64
+		var ok bool
+		switch symbol {
+		case "+":
+			v = l.u + r.u
+			ok = v >= l.u
+		case "-":
+			v = l.u - r.u
+			ok = r.u <= l.u
+		case "*":
+			v = l.u * r.u
+			ok = l.u == 0 || v/l.u == r.u
+		}
+		if !ok {
+			return nil, errors.New("constant arithmetic overflows uint64 (CEL errors on every evaluation)")
+		}
+		return &constNum{kind: constUint, u: v}, nil
+	}
+	return nil, nil
+}
+
+// negate renders CEL unary minus. Negated numeric literals stay plain
+// (constant, cannot overflow except -(min int64), which cel-go folds into the
+// literal); other operands gain a Cel.negOk guard.
+func (t *translator) negate(arg ast.Expr) (piece, error) {
+	p, err := t.expr(arg)
+	if err != nil {
+		return piece{}, err
+	}
+	out := piece{text: "-" + p.at(precNeg), prec: precNeg, kind: kTerm, guards: p.guards}
+	switch {
+	case p.num != nil:
+		switch p.num.kind {
+		case constInt:
+			if p.num.i == math.MinInt64 {
+				return piece{}, errors.New("constant negation overflows int64 (CEL errors on every evaluation)")
+			}
+			out.num = &constNum{kind: constInt, i: -p.num.i}
+		case constDouble:
+			out.num = &constNum{kind: constDouble}
+		case constUint:
+			// CEL has no unary minus on uint (type error); pass through.
+		}
+	case p.noArithErr:
+		out.noArithErr = true
+	default:
+		g := t.newGuard("Cel.negOk " + p.at(precApp+1))
+		out.guards = append(out.guards, g)
+	}
+	return out, nil
+}
+
+// equality renders ==/!=. When an operand is itself a proposition (e.g. the
+// CEL bool-of-bools `(a == b) == c`), propositional equality would not
+// type-check against a Bool operand, so ↔ is used instead. Equality is
+// error-strict and (for props) non-monotone, so operand guards float outward
+// rather than closing inside.
+func (t *translator) equality(fn string, args []ast.Expr) (piece, error) {
+	t.negDepth++
+	l, lerr := t.expr(args[0])
+	r, rerr := t.expr(args[1])
+	t.negDepth--
+	if lerr != nil {
+		return piece{}, lerr
+	}
+	if rerr != nil {
+		return piece{}, rerr
+	}
 	if l.kind == kProp || r.kind == kProp {
+		guards := mergeGuards(l, r)
 		l, r = t.liftProp(l), t.liftProp(r)
-		iff := piece{text: l.at(precIff+1) + " ↔ " + r.at(precIff+1), prec: precIff, kind: kProp}
+		iff := piece{text: l.at(precIff+1) + " ↔ " + r.at(precIff+1), prec: precIff, kind: kProp, guards: guards}
 		if fn == operators.NotEquals {
-			return piece{text: "¬(" + iff.text + ")", prec: precNot, kind: kProp}, nil
+			return piece{text: "¬(" + iff.text + ")", prec: precNot, kind: kProp, guards: guards}, nil
 		}
 		return iff, nil
 	}
@@ -549,6 +878,8 @@ func (t *translator) equality(fn string, args []ast.Expr) (piece, error) {
 	return t.binary(cmpOp(symbol), l, r), nil
 }
 
+// index renders CEL indexing (array position or map key) with CEL's
+// error-on-missing semantics via a pending isSome guard.
 func (t *translator) index(args []ast.Expr) (piece, error) {
 	recv, err := t.expr(args[0])
 	if err != nil {
@@ -558,9 +889,8 @@ func (t *translator) index(args []ast.Expr) (piece, error) {
 	if err != nil {
 		return piece{}, err
 	}
-	// `!` (panicking) indexing: CEL indexing is a runtime error out of range;
-	// inside a Prop the default value keeps the proposition total.
-	return piece{text: recv.at(precApp+1) + "[" + idx.text + "]!", prec: precAtom, kind: kTerm}, nil
+	recv.guards = mergeGuards(recv, idx)
+	return t.guardedIndex(recv, idx.text), nil
 }
 
 // boolLitArg reports whether e is the literal true/false, and which.
@@ -578,8 +908,15 @@ func boolLitArg(e ast.Expr) (value, ok bool) {
 // `c ? p : true`, `c ? true : p`, and `c ? p : false` are folded into the
 // propositions a Lean author would write (c → p, c ∨ p, c ∧ p); the general
 // case stays a (decidable) if-then-else.
+//
+// Error guards: the ternary is strict in its condition (an erroring condition
+// errors the whole ternary), so condition guards float outward; each branch
+// is only evaluated when taken, so branch guards close per-branch (in
+// positive polarity).
 func (t *translator) conditional(args []ast.Expr) (piece, error) {
+	t.negDepth++ // condition guards must not close inside the condition
 	cond, err := t.expr(args[0])
+	t.negDepth--
 	if err != nil {
 		return piece{}, err
 	}
@@ -590,12 +927,13 @@ func (t *translator) conditional(args []ast.Expr) (piece, error) {
 		if err != nil {
 			return piece{}, err
 		}
-		branch = t.liftProp(branch)
+		branch = t.liftProp(t.closeGuardsPositive(branch))
 		if v {
 			return piece{
-				text: cond.at(precArrow+1) + " → " + branch.at(precArrow),
-				prec: precArrow,
-				kind: kProp,
+				text:   cond.at(precArrow+1) + " → " + branch.at(precArrow),
+				prec:   precArrow,
+				kind:   kProp,
+				guards: mergeGuards(cond, branch),
 			}, nil
 		}
 		return t.binary(opAnd, cond, branch), nil
@@ -605,7 +943,7 @@ func (t *translator) conditional(args []ast.Expr) (piece, error) {
 		if err != nil {
 			return piece{}, err
 		}
-		return t.binary(opOr, cond, t.liftProp(branch)), nil
+		return t.binary(opOr, cond, t.liftProp(t.closeGuardsPositive(branch))), nil
 	}
 
 	a, err := t.expr(args[1])
@@ -619,7 +957,7 @@ func (t *translator) conditional(args []ast.Expr) (piece, error) {
 	resKind := kTerm
 	switch {
 	case a.kind == kProp || b.kind == kProp:
-		a, b = t.liftProp(a), t.liftProp(b)
+		a, b = t.liftProp(t.closeGuardsPositive(a)), t.liftProp(t.closeGuardsPositive(b))
 		resKind = kProp
 	case a.kind == kBool && b.kind == kBool:
 		resKind = kBool
@@ -628,5 +966,8 @@ func (t *translator) conditional(args []ast.Expr) (piece, error) {
 		text: "if " + cond.text + " then " + a.text + " else " + b.text,
 		prec: precLow,
 		kind: resKind,
+		// Term/Bool branch guards float (conservative: both branches must be
+		// error-free); Prop branch guards were closed per-branch above.
+		guards: mergeGuards(cond, a, b),
 	}, nil
 }

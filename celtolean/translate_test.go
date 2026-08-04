@@ -61,22 +61,27 @@ func TestTranslate(t *testing.T) {
 		{"chain_and", `this.a && this.b && this.c`, `x.a ∧ x.b ∧ x.c`, "prop", 0},
 		{"not_eq", `!(this == '')`, `¬x = ""`, "prop", 0},
 		{"not_and", `!(this.a && this.b)`, `¬(x.a ∧ x.b)`, "prop", 0},
-		{"arith", `this * 2 + 1 <= 100`, `x * 2 + 1 ≤ 100`, "prop", 0},
-		{"arith_assoc", `this - (this / 2) * 2 == this % 2`, `x - x / 2 * 2 = x % 2`, "prop", 0},
-		{"sub_reassoc", `this - (this - 1) == 1`, `x - (x - 1) = 1`, "prop", 0},
+		{"arith", `this * 2 + 1 <= 100`,
+			`(if h : Cel.mulOk x 2 then if h_1 : Cel.addOk (x * 2) 1 then x * 2 + 1 ≤ 100 else False else False)`, "prop", 0},
+		{"arith_assoc", `this - (this / 2) * 2 == this % 2`,
+			`(if h : Cel.mulOk (x / 2) 2 then if h_1 : Cel.subOk x (x / 2 * 2) then x - x / 2 * 2 = x % 2 else False else False)`, "prop", 0},
+		{"sub_reassoc", `this - (this - 1) == 1`,
+			`(if h : Cel.subOk x 1 then if h_1 : Cel.subOk x (x - 1) then x - (x - 1) = 1 else False else False)`, "prop", 0},
 		{"concat", `this + '!' == 'hi!'`, `x + "!" = "hi!"`, "prop", 0},
 		{"bool_of_bools_iff", `!this.a == this.b`, `¬x.a ↔ x.b`, "prop", 0},
-		{"index", `this[0] > 5`, `x[0]! > 5`, "prop", 0},
+		{"index", `this[0] > 5`, `(if h : (x[0]?).isSome then (x[0]?).get h > 5 else False)`, "prop", 0},
 		{"map_key_in", `'k' in this.labels`, `"k" ∈ x.labels`, "prop", 0},
-		{"map_index", `this.labels['env'] == 'prod'`, `x.labels["env"]! = "prod"`, "prop", 0},
+		{"map_index", `this.labels['env'] == 'prod'`,
+			`(if h : (x.labels["env"]?).isSome then (x.labels["env"]?).get h = "prod" else False)`, "prop", 0},
 
 		// -- macros --------------------------------------------------------------
 		{"exists", `this.exists(v, v in [1, 2])`, `∃ v ∈ x, v ∈ #[1, 2]`, "prop", 0},
 		{"exists_one", `this.exists_one(i, i > 0)`, `x.countP (fun i => decide (i > 0)) = 1`, "prop", 0},
 		{"nested_all", `this.all(a, a.all(b, b > 0))`, `∀ a ∈ x, ∀ b ∈ a, b > 0`, "prop", 0},
-		{"map_macro_eq", `this.map(v, v * 2) == [2, 4]`, `x.map (fun v => v * 2) = #[2, 4]`, "prop", 0},
+		{"map_macro_eq", `this.map(v, v * 2) == [2, 4]`,
+			`(if h_1 : (∀ v ∈ x, Cel.mulOk v 2) then x.map (fun v => v * 2) = #[2, 4] else False)`, "prop", 0},
 		{"map_filter_macro", `this.map(v, v > 0, v * 2).size() > 0`,
-			`((x.filter (fun v => decide (v > 0))).map (fun v => v * 2)).size > 0`, "prop", 0},
+			`(if h_1 : (∀ v ∈ x, Cel.mulOk v 2) then ((x.filter (fun v => decide (v > 0))).map (fun v => v * 2)).size > 0 else False)`, "prop", 0},
 		{"filter_size", `this.filter(i, i > 0).size() == this.size()`,
 			`(x.filter (fun i => decide (i > 0))).size = x.size`, "prop", 0},
 		{"map_then_exists", `this.map(s, s.size()).exists(n, n > 10)`,
@@ -115,9 +120,42 @@ func TestTranslate(t *testing.T) {
 		{"keyword_fields", `this.end > this.from`, `x.«end» > x.«from»`, "prop", 0},
 		{"deep_chain", `this.a.b.c == 1`, `x.aD.bD.c = 1`, "prop", 0},
 		{"deep_final_message", `this.a.b != null`, `x.aD.b ≠ none`, "prop", 0},
-		{"deep_then_index", `this.a.items[0].c > 0`, `x.aD.items[0]!.c > 0`, "prop", 0},
+		{"deep_then_index", `this.a.items[0].c > 0`,
+			`(if h : (x.aD.items[0]?).isSome then ((x.aD.items[0]?).get h).c > 0 else False)`, "prop", 0},
 		{"deep_then_macro", `this.a.tags.all(t, t.size() > 0)`, `∀ t ∈ x.aD.tags, t.size > 0`, "prop", 0},
 		{"free_ident", `min_len <= this.size()`, `min_len ≤ x.size`, "prop", 1},
+
+		// -- CEL error semantics: guarded indexing and arithmetic ---------------
+		// An out-of-range index / overflow errors in CEL, and an erroring rule
+		// is not satisfied: the guarded dite is False exactly then.
+		{"index_negated", `!(this[0] > 5)`,
+			`(if h : (x[0]?).isSome then ¬(x[0]?).get h > 5 else False)`, "prop", 0},
+		{"index_conjunct", `this[0] > 5 && this.size() == 1`,
+			`(if h : (x[0]?).isSome then (x[0]?).get h > 5 else False) ∧ x.size = 1`, "prop", 0},
+		{"index_disjunct_absorbs", `this[0] > 5 || true`,
+			`(if h : (x[0]?).isSome then (x[0]?).get h > 5 else False) ∨ True`, "prop", 0},
+		{"index_not_conjunction_floats", `!(this[0] > 5 && this.size() == 1)`,
+			`(if h : (x[0]?).isSome then ¬((x[0]?).get h > 5 ∧ x.size = 1) else False)`, "prop", 0},
+		{"index_in_implication_cond_floats", `this[0] > 5 ? this.size() == 1 : true`,
+			`(if h : (x[0]?).isSome then (x[0]?).get h > 5 → x.size = 1 else False)`, "prop", 0},
+		{"index_in_implication_branch", `this.size() == 1 ? this[0] > 5 : true`,
+			`x.size = 1 → (if h : (x[0]?).isSome then (x[0]?).get h > 5 else False)`, "prop", 0},
+		{"nested_index", `this[this[0]] == 1`,
+			`(if h : (x[0]?).isSome then if h_1 : (x[(x[0]?).get h]?).isSome then (x[(x[0]?).get h]?).get h_1 = 1 else False else False)`,
+			"prop", 0},
+		{"all_body_index", `this.all(i, this[0] <= i)`,
+			`∀ i ∈ x, (if h : (x[0]?).isSome then (x[0]?).get h ≤ i else False)`, "prop", 0},
+		{"neg_guarded", `-this < 0`, `(if h : Cel.negOk x then -x < 0 else False)`, "prop", 0},
+		{"neg_literal_plain", `this < -1 + 2`, `x < -1 + 2`, "prop", 0},
+		{"uint_sub_guarded", `this - 1u >= 0u`,
+			`(if h : Cel.subOk x 1 then x - 1 ≥ 0 else False)`, "prop", 0},
+		{"size_arith_guarded", `this.size() - 1 <= 10`,
+			`(if h : Cel.subOk x.size 1 then x.size - 1 ≤ 10 else False)`, "prop", 0},
+		{"concat_unguarded", `this + 'a' + 'b' == 'ab'`, `x + "a" + "b" = "ab"`, "prop", 0},
+		{"list_concat_unguarded", `this + [1] == [2, 1]`, `x + #[1] = #[2, 1]`, "prop", 0},
+		{"const_arith_folds", `this == 2 + 3 * 4`, `x = 2 + 3 * 4`, "prop", 0},
+		{"time_arith_unguarded", `now - this <= duration('24h')`,
+			`Cel.now - x ≤ Cel.Duration.mk 86400 0`, "prop", 1},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -227,6 +265,71 @@ func TestCustomVar(t *testing.T) {
 	}
 }
 
+// Path attributes: proto-descriptor knowledge routed in by the plugin.
+func TestPathAttrs(t *testing.T) {
+	attrs := map[string]PathAttr{
+		"":              PathEnumInt, // used only by the enum rows below
+		"tier":          PathEnumInt,
+		"featured.tier": PathEnumInt,
+		"labels":        PathMapSelect,
+	}
+	tests := []struct {
+		cel  string
+		want string
+	}{
+		{`this == 2`, `x.toInt32 = 2`},
+		{`this.tier == 2 || this.tier == this.featured.tier`,
+			`tier.toInt32 = 2 ∨ tier.toInt32 = (Order.featuredD featured).tier.toInt32`},
+		{`this.labels.env == 'prod'`,
+			`(if h : (labels["env"]?).isSome then (labels["env"]?).get h = "prod" else False)`},
+		{`has(this.labels.env) ? this.tier == 1 : true`, `(labels["env"]?).isSome → tier.toInt32 = 1`},
+	}
+	fields := map[string]ThisField{
+		"tier":     {Text: "tier"},
+		"featured": {Text: "(Order.featuredD featured)"},
+		"labels":   {Text: "labels"},
+		"size":     {},
+	}
+	for _, tt := range tests {
+		var opts Options
+		if strings.Contains(tt.cel, "this.") {
+			opts = Options{ThisFields: fields, PathAttrs: attrs}
+		} else {
+			opts = Options{PathAttrs: attrs}
+		}
+		got, err := Translate(tt.cel, opts)
+		if err != nil {
+			t.Fatalf("Translate(%q): %v", tt.cel, err)
+		}
+		if got.Lean != tt.want {
+			t.Errorf("Translate(%q)\n  got:  %s\n  want: %s", tt.cel, got.Lean, tt.want)
+		}
+	}
+}
+
+// Literal regex patterns must be inside the Lean engine's subset and are
+// reported for #guard emission.
+func TestRegexGate(t *testing.T) {
+	got, err := Translate(`this.matches('^a+$') && this.matches('^a+$') || this.matches('b')`, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"^a+$", "b"}; len(got.Regexes) != 2 || got.Regexes[0] != want[0] || got.Regexes[1] != want[1] {
+		t.Errorf("Regexes = %v, want %v", got.Regexes, want)
+	}
+	if _, err := Translate(`this.matches('(?i)abc')`, Options{}); err == nil ||
+		!strings.Contains(err.Error(), "outside the supported RE2 subset") {
+		t.Errorf("unsupported pattern: err = %v, want subset error", err)
+	}
+	res, err := Translate(`this.matches(this)`, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Warnings) != 1 || !strings.Contains(res.Warnings[0], "non-literal regex") {
+		t.Errorf("non-literal pattern warnings = %v, want non-literal warning", res.Warnings)
+	}
+}
+
 func TestTranslateErrors(t *testing.T) {
 	tests := []struct {
 		name string
@@ -239,6 +342,11 @@ func TestTranslateErrors(t *testing.T) {
 		{"parse_error", `this ==`, "Syntax error"},
 		{"has_non_select", `has(this)`, "field selection"},
 		{"macro_var", `this.all(a + 1, true)`, "iteration variable"},
+		{"bad_regex", `this.matches('\\bword')`, "outside the supported RE2 subset"},
+		{"const_overflow", `this == 9223372036854775807 + 1`, "overflows int64"},
+		{"const_underflow", `this == 1u - 2u`, "overflows uint64"},
+		{"index_in_filter_body", `this.filter(v, this[v] > 0).size() == 0`, "inside a filter() body"},
+		{"index_in_negated_all", `!this.all(v, this[0] < v)`, "under a negation"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
