@@ -89,7 +89,7 @@ theorem M.decodeValid_sound : M.decodeValid bytes = .ok v →
 The scheme: `M.checkPred b : Protovalidate.Decision (M.ValidPred b)` decides
 the whole predicate at once — each step either extends the proof or refutes
 it while reporting the first violation in protovalidate rule order — and
-`validate` is its `Except` view, so the theorems are instances of two generic
+`validate` is its `Except` view, so the theorems are instances of the generic
 `Decision` lemmas with no per-message proof search. Soundness hands back the
 conjuncts over the *input* base value (`(M.validate_sound h).items_elems`),
 which downstream code can project and rewrite along without re-running any
@@ -103,8 +103,8 @@ they instantiate:
 | target | principal theorems |
 |---|---|
 | `//lean:runtime_assurance` | the generic `Decision` lemmas (`pred_of_toExcept_ok`, `toExcept_isOk`, `decodeThenValidate_sound`), the presence plumbing, `size_mapArray` — plus a scan of the whole `Protovalidate.Cel`/`Runtime` surface the generated propositions are stated over |
-| `//examples/shipping:shipping_valid_assurance` | `shipping.v1.Valid.{Order,Item,Order.payer_Type}` soundness/completeness/decode |
-| `//examples/shipping:inventory_valid_assurance` | `catalog.v1.Valid.{Product,Payment,Payment.method_Type}` (standard rules, enums, element rules, validated oneof) |
+| `//examples/shipping:shipping_valid_assurance` | `shipping.v1.Valid.{Order,Item}` (soundness, completeness, decode) and the validated `Order.payer_Type` sum |
+| `//examples/shipping:inventory_valid_assurance` | `catalog.v1.Valid.{Product,Payment}` and the `Payment.method_Type` sum (standard rules, enums, element rules, validated oneof) |
 
 A repeated-message field's own rules are stated over the *validated* array
 (`Protovalidate.mapArray b.f Elem.ofPred h.f_elems`), because those rules may
