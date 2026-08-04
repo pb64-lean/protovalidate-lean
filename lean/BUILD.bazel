@@ -34,6 +34,16 @@ lean_library(
     strip_module_prefix = "lean",
 )
 
+# Recognizer laws for Cel.Format: properties that hold for every input, as
+# opposed to the conformance battery's finitely many labelled points. Not part
+# of the runtime library — nothing generated depends on them.
+lean_library(
+    name = "protovalidate_format_laws",
+    srcs = ["Protovalidate/Cel/FormatLaws.lean"],
+    strip_module_prefix = "lean",
+    deps = [":protovalidate_cel"],
+)
+
 # Compile-time audit of the proof scheme itself. Every generated
 # validate_sound / validate_complete / decodeValid_sound is a one-line instance
 # of a lemma below, so this is the root of trust the per-message audits stand
@@ -61,4 +71,21 @@ lean_assurance_test(
         ":protovalidate_cel",
         ":protovalidate_runtime",
     ],
+)
+
+# The Cel.Format recognizer laws must be theorems closing over no axiom beyond
+# the standard three. `ipv4Value?_lt` is the load-bearing one: isIpPrefix's
+# host-bit masking assumes exactly it.
+lean_assurance_test(
+    name = "format_laws_assurance",
+    principal_theorems = [
+        "Cel.Format.ipv4Value?_lt",
+        "Cel.Format.ipv4Octet?_le_255",
+        "Cel.Format.ipv4Value?_length",
+        "Cel.Format.isIpv4_splitOn_length",
+        "Cel.Format.isHostname_length",
+        "Cel.Format.isPort_le",
+        "Cel.Format.isIp_version",
+    ],
+    deps = [":protovalidate_format_laws"],
 )

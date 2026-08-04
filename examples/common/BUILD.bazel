@@ -3,6 +3,7 @@
 consumed by //examples/shipping via proto_deps/valid_deps."""
 
 load("@protobuf//bazel:proto_library.bzl", "proto_library")
+load("@rules_lean//lean:defs.bzl", "lean_assurance_test")
 load("@rules_lean_grpc//:defs.bzl", "lean_proto_library")
 load("//protovalidate:defs.bzl", "lean_protovalidate_library")
 
@@ -23,4 +24,17 @@ lean_protovalidate_library(
     name = "money_valid",
     lean_proto = ":money_lean",
     proto = ":money_proto",
+)
+
+# The last generated example without an axiom audit: the target //examples/
+# shipping consumes through valid_deps, so the cross-target embed's theorems
+# are audited at their source too.
+lean_assurance_test(
+    name = "money_valid_assurance",
+    principal_theorems = [
+        "common.v1.Valid.Money.validate_sound",
+        "common.v1.Valid.Money.validate_complete",
+        "common.v1.Valid.Money.decodeValid_sound",
+    ],
+    deps = [":money_valid"],
 )

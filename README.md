@@ -96,15 +96,17 @@ which downstream code can project and rewrite along without re-running any
 checks. `Test/PredSchemeTest.lean` keeps a hand-written mirror of the emission
 scheme compiling.
 
-Three `lean_assurance_test` targets audit axiom closures at compile time (no
+Five `lean_assurance_test` targets audit axiom closures at compile time (no
 `sorryAx`, standard axioms only), covering both the instances and the scheme
-they instantiate:
+they instantiate. Every generated example in the repo is audited:
 
 | target | principal theorems |
 |---|---|
 | `//lean:runtime_assurance` | the generic `Decision` lemmas (`pred_of_toExcept_ok`, `toExcept_isOk`, `decodeThenValidate_sound`), the presence plumbing, `size_mapArray` — plus a scan of the whole `Protovalidate.Cel`/`Runtime` surface the generated propositions are stated over |
+| `//lean:format_laws_assurance` | the `Cel.Format` recognizer laws (see [format assurance](#format-assurance-what-the-battery-does-and-does-not-say)), headed by `ipv4Value?_lt` |
 | `//examples/shipping:shipping_valid_assurance` | `shipping.v1.Valid.{Order,Item}` (soundness, completeness, decode) and the validated `Order.payer_Type` sum |
 | `//examples/shipping:inventory_valid_assurance` | `catalog.v1.Valid.{Product,Payment}` and the `Payment.method_Type` sum (standard rules, enums, element rules, validated oneof) |
+| `//examples/common:money_valid_assurance` | `common.v1.Valid.Money` — the cross-target embed, audited at its source |
 
 A repeated-message field's own rules are stated over the *validated* array
 (`Protovalidate.mapArray b.f Elem.ofPred h.f_elems`), because those rules may
@@ -513,6 +515,17 @@ checking in URI hosts. All are fixed; the corpus is what keeps them fixed.
   `well_known_regex`) are rejected at generation time, so they have no
   corpus rows.
 
+**Proved, not sampled.** `Cel.Format`'s recognizer laws
+(`lean/Protovalidate/Cel/FormatLaws.lean`, audited by
+`//lean:format_laws_assurance`) carry the complementary kind of evidence —
+properties holding for *every* input rather than for corpus points. The
+load-bearing one is `ipv4Value?_lt`: the value an accepted IPv4 address denotes
+really is below `2 ^ 32`, which is exactly what `isIpPrefix`'s host-bit masking
+(`v % 2 ^ (32 - len)`) assumes. The others pin documented shape claims
+(`ipv4Value?_length`, `isHostname_length`, `isPort_le`, `isIp_version` — only
+versions 0/4/6 are ever accepted). The URI, email and IPv6 grammars carry no
+such laws; they rest on the corpus alone.
+
 ## Layout
 
 ```
@@ -520,7 +533,8 @@ celtolean/            Go library: CEL AST → Lean expression (golden tests)
 cmd/cel2lean/         CLI: single expression, -json, -batch corpus→Lean
 cmd/protoc-gen-lean-protovalidate/  protoc plugin entry point
 leanvalidate/         plugin codegen: descriptors + buf.validate rules → Lean
-lean/Protovalidate/   Lean runtime (modules Protovalidate.Cel, .Runtime)
+lean/Protovalidate/   Lean runtime (modules Protovalidate.Cel, .Runtime) plus
+                      Cel/FormatLaws.lean (recognizer theorems, not runtime)
 protovalidate/        Starlark API: lean_protovalidate_library (defs.bzl)
 Test/                 corpus TSV + genrule compiling every translation with
                       Decidable assertions (build_test) + stand-in msg types.
@@ -569,6 +583,7 @@ non-generated, option-only proto dependencies such as
    per-pattern differential batteries (see
    [regex assurance](#regex-assurance-what-the-guards-do-and-do-not-say)), nor
    between `Cel.Format`'s grammars and their RFCs beyond the conformance
-   battery (see
+   battery and the IPv4/hostname/port recognizer laws (see
    [format assurance](#format-assurance-what-the-battery-does-and-does-not-say)).
-   Both corpora are vendored snapshots of upstream references.
+   Both corpora are vendored snapshots of upstream references; the URI, email
+   and IPv6 grammars carry no laws yet.
