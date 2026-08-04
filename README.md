@@ -427,8 +427,9 @@ is worth being exact about their reach.
    the match-nothing fallback (and with it the unsoundness of
    `!this.matches(p)` degenerating to `true`).
 3. A **differential battery** per pattern: probe strings walked out of the
-   pattern's own RE2 syntax tree (both alternation branches, minimum and one
-   extra repetition, class representatives) plus perturbations, each labelled
+   pattern's own RE2 syntax tree (the first and the last alternative, the
+   minimum and one extra repetition, class representatives) plus
+   perturbations of those, each labelled
    by Go's RE2 engine — the reference `matches` semantics — and emitted as
    `#guard Cel.regexMatch "<probe>" "<pattern>"` /
    `#guard !(Cel.regexMatch …)`. Lean re-decides every one at elaboration
@@ -462,7 +463,9 @@ leanvalidate/         plugin codegen: descriptors + buf.validate rules → Lean
 lean/Protovalidate/   Lean runtime (modules Protovalidate.Cel, .Runtime)
 protovalidate/        Starlark API: lean_protovalidate_library (defs.bzl)
 Test/                 corpus TSV + genrule compiling every translation with
-                      Decidable assertions (build_test) + stand-in msg types
+                      Decidable assertions (build_test) + stand-in msg types.
+                      A row's flags may carry `dom=<proto kind>` to supply the
+                      descriptor typing the plugin would derive.
 examples/shipping/    end-to-end pipeline example + runtime lean_test
 ```
 
