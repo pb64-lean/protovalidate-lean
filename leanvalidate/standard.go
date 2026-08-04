@@ -36,6 +36,9 @@ type loweredRule struct {
 	direct func(fg *fileGen, subject string) (text string, prec int, err error)
 	// idents are identifiers occurring in any embedded CEL (binder hygiene).
 	idents map[string]bool
+	// pathAttrs carries proto-descriptor knowledge (enum integer views, map
+	// selection) for the rule's `this` paths; see pathattrs.go.
+	pathAttrs map[string]celtolean.PathAttr
 }
 
 // fieldRuleSet is everything protovalidate says about one field.
@@ -54,7 +57,7 @@ func (s fieldRuleSet) empty() bool { return len(s.rules) == 0 && !s.required }
 // render evaluates a lowered rule against a subject expression.
 func (fg *fileGen) renderRule(r loweredRule, subject string) (string, int, error) {
 	if r.cel != "" {
-		res, err := fg.translate(r.cel, celtolean.Options{Var: subject})
+		res, err := fg.translate(r.cel, celtolean.Options{Var: subject, PathAttrs: r.pathAttrs})
 		if err != nil {
 			return "", 0, fmt.Errorf("rule %q: %w", r.id, err)
 		}
@@ -110,6 +113,9 @@ func lowerFieldRules(fd *protogen.Field) (fieldRuleSet, error) {
 		lr, err := celRule(r.GetId(), r.GetMessage(), r.GetExpression())
 		if err != nil {
 			return set, err
+		}
+		if lr.pathAttrs, err = pathAttrsForField(fd.Desc, r.GetExpression()); err != nil {
+			return set, fmt.Errorf("rule %q: %w", r.GetId(), err)
 		}
 		set.rules = append(set.rules, lr)
 	}
@@ -976,7 +982,7 @@ func lowerRepeated(fd *protogen.Field, r *validatepb.RepeatedRules) ([]loweredRu
 			return nil, fmt.Errorf("repeated.items rules on message elements are not supported " +
 				"(element messages validate through their own rules)")
 		}
-		inner, ierr := lowerItemRules(fd, items)
+		inner, ierr := lowerItemRules(fd, fd.Desc, items)
 		if ierr != nil {
 			return nil, fmt.Errorf("repeated.items: %w", ierr)
 		}
@@ -1003,7 +1009,7 @@ func lowerMap(fd *protogen.Field, r *validatepb.MapRules) ([]loweredRule, error)
 			fmt.Sprintf("this.size() <= %d", r.GetMaxPairs()))
 	}
 	if keys := r.GetKeys(); keys != nil {
-		inner, ierr := lowerItemRules(fd, keys)
+		inner, ierr := lowerItemRules(fd, fd.Desc.MapKey(), keys)
 		if ierr != nil {
 			return nil, fmt.Errorf("map.keys: %w", ierr)
 		}
@@ -1017,7 +1023,7 @@ func lowerMap(fd *protogen.Field, r *validatepb.MapRules) ([]loweredRule, error)
 		if fd.Desc.MapValue().Kind() == protoreflect.MessageKind {
 			return nil, fmt.Errorf("map.values rules on message values are not supported")
 		}
-		inner, ierr := lowerItemRules(fd, values)
+		inner, ierr := lowerItemRules(fd, fd.Desc.MapValue(), values)
 		if ierr != nil {
 			return nil, fmt.Errorf("map.values: %w", ierr)
 		}
@@ -1033,7 +1039,7 @@ func lowerMap(fd *protogen.Field, r *validatepb.MapRules) ([]loweredRule, error)
 // lowerItemRules lowers the element-level FieldRules of repeated.items /
 // map.keys / map.values (standard scalar rules plus custom CEL over the
 // element as `this`).
-func lowerItemRules(fd *protogen.Field, fr *validatepb.FieldRules) ([]loweredRule, error) {
+func lowerItemRules(fd *protogen.Field, elem protoreflect.FieldDescriptor, fr *validatepb.FieldRules) ([]loweredRule, error) {
 	if fr.GetRepeated() != nil || fr.GetMap() != nil {
 		return nil, fmt.Errorf("nested container rules are not supported")
 	}
@@ -1046,6 +1052,7 @@ func lowerItemRules(fd *protogen.Field, fr *validatepb.FieldRules) ([]loweredRul
 		if cerr != nil {
 			return nil, cerr
 		}
+		lr.pathAttrs = pathAttrsForElement(elem)
 		rules = append(rules, lr)
 	}
 	return rules, nil

@@ -30,7 +30,12 @@ message Product {
   bool published = 9 [(buf.validate.field).bool.const = true,
                       (buf.validate.field).ignore = IGNORE_IF_ZERO_VALUE];
   bytes checksum = 10 [(buf.validate.field).bytes = { len: 4, prefix: "\x89P" }];
-  Tier tier = 11 [(buf.validate.field).enum = { defined_only: true, not_in: [3] }];
+  Tier tier = 11 [(buf.validate.field).enum = { defined_only: true, not_in: [3] },
+                  (buf.validate.field).cel = {
+                    // custom CEL on an enum field: CEL compares enums as ints
+                    id: "tier.assigned", message: "tier must be assigned",
+                    expression: "this >= 1"
+                  }];
   repeated string tags = 12 [(buf.validate.field).repeated = {
     min_items: 1, max_items: 8, unique: true,
     items: { string: { min_len: 2, max_len: 16 } }

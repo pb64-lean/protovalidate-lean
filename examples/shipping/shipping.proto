@@ -12,6 +12,10 @@ message Item {
   }];
   int32 quantity = 2 [(buf.validate.field).cel = {
     id: "quantity.positive", expression: "this > 0"
+  }, (buf.validate.field).cel = {
+    // arithmetic in a rule: overflow makes the rule fail (CEL error semantics)
+    id: "quantity.capacity", message: "quantity * unit cost must stay under the cap",
+    expression: "this * 100 <= 1000000"
   }];
 }
 
@@ -55,6 +59,21 @@ message Order {
   option (buf.validate.message).cel = {
     id: "order.tracking_len",
     expression: "this.tracking == '' || this.tracking.size() >= 5"
+  };
+  option (buf.validate.message).cel = {
+    // map selection sugar: this.labels.priority is guarded key access
+    id: "order.priority_label",
+    expression: "has(this.labels.priority) ? this.labels.priority in ['low', 'high'] : true"
+  };
+  option (buf.validate.message).cel = {
+    // indexing: out-of-range would be a CEL error, hence the guarded size check
+    id: "order.first_item_qty",
+    expression: "this.items.size() == 0 || this.items[0].quantity <= 1000"
+  };
+  option (buf.validate.message).cel = {
+    // enum-typed leaf in a message rule (compared as int)
+    id: "order.featured_tier",
+    expression: "this.featured.tier != 1"
   };
   string id = 1 [(buf.validate.field).cel = {
     id: "id.len", expression: "this.size() == 8"

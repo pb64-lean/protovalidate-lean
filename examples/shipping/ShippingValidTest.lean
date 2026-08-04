@@ -63,4 +63,30 @@ def main : IO Unit := do
     "shipped with tracking"
   expect shipped.tracking.isSome "tracking kept"
 
+  -- Arithmetic with CEL overflow semantics: quantity * 100 computed in the
+  -- CEL domain — an in-range violation and a 32-bit overflow both fail.
+  expectViolation (Valid.Item.validate { goodItem with quantity := 10001 })
+    "quantity.capacity" "over capacity"
+  expectViolation (Valid.Item.validate { goodItem with quantity := 30000000 })
+    "quantity.capacity" "capacity overflow guard"
+
+  -- Map selection sugar: this.labels.priority is guarded key access.
+  expectViolation
+    (Valid.Order.validate { goodOrder with labels := Std.HashMap.ofList [("priority", "mid")] })
+    "order.priority_label" "bad priority label"
+  let prio ← expectOk
+    (Valid.Order.validate { goodOrder with labels := Std.HashMap.ofList [("priority", "high")] })
+    "good priority label"
+  expect (prio.labels.contains "priority") "labels kept"
+  discard <| expectOk (Valid.Order.validate { goodOrder with labels := Std.HashMap.ofList [("env", "prod")] })
+    "absent priority key skips the rule"
+
+  -- Indexing in a message rule: this.items[0] under an isSome guard.
+  expectViolation
+    (Valid.Order.validate { goodOrder with items := #[{ goodItem with quantity := 1001 }] })
+    "order.first_item_qty" "first item too large"
+  discard <| expectOk
+    (Valid.Order.validate { goodOrder with items := #[{ goodItem with quantity := 999 }, goodItem] })
+    "first item in range"
+
   IO.println "all shipping_valid assertions passed"

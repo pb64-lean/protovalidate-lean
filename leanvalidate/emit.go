@@ -111,10 +111,13 @@ type fileGen struct {
 	// validated types can be referenced.
 	covered map[string]bool
 	notes   map[string]bool
+	// regexes collects the literal patterns of every translated rule; each
+	// gets a compile-time `#guard Cel.Regex.accepts` in the generated file.
+	regexes map[string]bool
 }
 
 func generateFile(gen *protogen.Plugin, f *protogen.File, cfg Config, msgs map[protoreflect.FullName]*msgInfo, targets, covered map[string]bool) error {
-	fg := &fileGen{cfg: cfg, msgs: msgs, targets: targets, covered: covered, notes: map[string]bool{}}
+	fg := &fileGen{cfg: cfg, msgs: msgs, targets: targets, covered: covered, notes: map[string]bool{}, regexes: map[string]bool{}}
 
 	// Messages of this file needing a validated variant, topologically sorted
 	// so embedded validated types are declared before their containers.
@@ -162,6 +165,11 @@ func generateFile(gen *protogen.Plugin, f *protogen.File, cfg Config, msgs map[p
 
 	out.P("public import Protovalidate.Cel")
 	out.P("public import Protovalidate.Runtime")
+	if len(fg.regexes) > 0 {
+		// #guard evaluates Cel.Regex.accepts at elaboration time, which needs
+		// the implementation meta-imported under the module system.
+		out.P("meta import Protovalidate.Cel.Regex")
+	}
 	out.P("public import ", cfg.BasePrefix, ".", protoStem(f.Desc.Path()))
 	imports := f.Desc.Imports()
 	for i := 0; i < imports.Len(); i++ {
@@ -179,6 +187,21 @@ func generateFile(gen *protogen.Plugin, f *protogen.File, cfg Config, msgs map[p
 	out.P()
 	out.P("set_option linter.unusedVariables false")
 	out.P()
+	if len(fg.regexes) > 0 {
+		out.P("-- Acceptance backstop: every literal regex must be inside the subset the")
+		out.P("-- Lean engine (Cel.Regex) supports — an unsupported pattern would match")
+		out.P("-- nothing at runtime, which is unsound under negation. A failing guard")
+		out.P("-- means the generator's Go-side gate and the Lean engine disagree.")
+		regexes := make([]string, 0, len(fg.regexes))
+		for re := range fg.regexes {
+			regexes = append(regexes, re)
+		}
+		sort.Strings(regexes)
+		for _, re := range regexes {
+			out.P("#guard Cel.Regex.accepts ", celtolean.LeanString(re))
+		}
+		out.P()
+	}
 	if len(fg.notes) > 0 {
 		out.P("/- cel2lean translation notes:")
 		notes := make([]string, 0, len(fg.notes))
@@ -210,6 +233,9 @@ func (fg *fileGen) translate(cel string, opts celtolean.Options) (*celtolean.Res
 	}
 	for _, w := range res.Warnings {
 		fg.notes[w] = true
+	}
+	for _, re := range res.Regexes {
+		fg.regexes[re] = true
 	}
 	return res, nil
 }
@@ -635,7 +661,11 @@ func (fg *fileGen) emitMessage(w *strings.Builder, mi *msgInfo) error {
 	}
 	var props []*propPlan
 	for i, r := range mi.msgRules {
-		res, err := fg.translate(r.GetExpression(), celtolean.Options{ThisFields: thisFields})
+		attrs, err := pathAttrsForMessage(m.Desc, r.GetExpression())
+		if err != nil {
+			return fmt.Errorf("message rule %q: %w", r.GetId(), err)
+		}
+		res, err := fg.translate(r.GetExpression(), celtolean.Options{ThisFields: thisFields, PathAttrs: attrs})
 		if err != nil {
 			return fmt.Errorf("message rule %q: %w", r.GetId(), err)
 		}

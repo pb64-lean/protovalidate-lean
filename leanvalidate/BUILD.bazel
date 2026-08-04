@@ -5,6 +5,7 @@ go_library(
     srcs = [
         "emit.go",
         "generator.go",
+        "pathattrs.go",
         "standard.go",
     ],
     importpath = "github.com/petersonbill64/protovalidate-lean/leanvalidate",

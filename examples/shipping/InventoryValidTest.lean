@@ -60,6 +60,7 @@ def main : IO Unit := do
   expectId (Valid.Product.validate { goodProduct with checksum := ByteArray.mk #[1, 2, 3, 4] }) "bytes.prefix" "bytes prefix"
   expectId (Valid.Product.validate { goodProduct with tier := .LEGACY }) "enum.not_in" "enum not_in"
   expectId (Valid.Product.validate { goodProduct with tier := .«Unknown.Value» 42 }) "enum.defined_only" "enum defined_only"
+  expectId (Valid.Product.validate { goodProduct with tier := .TIER_UNSPECIFIED }) "tier.assigned" "enum custom cel (as int)"
   expectId (Valid.Product.validate { goodProduct with tags := #[] }) "repeated.min_items" "min_items"
   expectId (Valid.Product.validate { goodProduct with tags := #["a"] }) "repeated.items" "items"
   expectId (Valid.Product.validate { goodProduct with tags := #["home", "home"] }) "repeated.unique" "unique"
@@ -162,6 +163,9 @@ def main : IO Unit := do
     "order.tracking_len" "optional scalar value access"
   expectId (shipping.v1.Valid.Order.validate { order with tracking := some "TN123" })
     "" "tracking long enough"
+  expectId (shipping.v1.Valid.Order.validate
+    { order with featured := some { goodProduct with tier := .BASIC } })
+    "order.featured_tier" "enum leaf in message rule"
 
   -- nested oneof member access in message rules (final and intermediate hops)
   expectId (shipping.v1.Valid.Order.validate
