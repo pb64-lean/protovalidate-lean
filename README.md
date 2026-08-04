@@ -152,9 +152,12 @@ RE2-labelled probe strings (see
 [regex assurance](#regex-assurance-what-the-guards-do-and-do-not-say)) — and
 decided at runtime by the pure-Lean engine in
 `Protovalidate.Cel.Regex` (a Pike-VM NFA: classes, Perl classes, anchors,
-alternation, bounded quantifiers; linear time, total). The `email/hostname/ip/uri/...` formats are
-real implementations in `Protovalidate.Cel.Format` following protovalidate's
-grammars. `timestamp('...')`/`duration('...')` literals fold to
+alternation, bounded quantifiers; linear time, total). The
+`email/hostname/ip/uri/...` formats are real implementations in
+`Protovalidate.Cel.Format` following protovalidate's grammars, differentially
+tested at Lean compile time against protovalidate's own conformance suite (see
+[format assurance](#format-assurance-what-the-battery-does-and-does-not-say)).
+`timestamp('...')`/`duration('...')` literals fold to
 `Cel.Timestamp.mk`/`Cel.Duration.mk` constants at codegen time, with RFC
 3339/duration parsers and timestamp/duration arithmetic (`now - this <=
 duration('24h')`) available at runtime.
@@ -249,7 +252,7 @@ layer will assemble `{ x : T // <emitted proposition> }` itself.
 | `l.map(v, e)` / `l.filter(v, p)` | `l.map (fun v => e)` / `l.filter (fun v => p)` | Props `decide`-wrapped in Bool positions |
 | `unique()` | `l.Nodup` | `Array.Nodup` shim, decidable |
 | `isNan` `isInf` | `.isNaN` `.isInf`/`.isInfSign` | |
-| `isEmail` `isHostname` `isUri` `isUriRef` `isIp` `isIpPrefix` `isHostAndPort` | `.isEmail` ... | real grammars in `Cel.Format` (RFC 5322 dot-atom, RFC 1034, RFC 4291, RFC 3986, CIDR) |
+| `isEmail` `isHostname` `isUri` `isUriRef` `isIp` `isIpPrefix` `isHostAndPort` | `.isEmail` ... | real grammars in `Cel.Format` (HTML-standard email, RFC 1034, RFC 4291 + RFC 4007 zones, RFC 3986 + RFC 6874, CIDR) |
 | `int() uint() double() bool()` | `Cel.toInt` ... | typeclass conversions |
 | `string(e)` / `bytes(e)` / `dyn(e)` | `toString e` / `e.toUTF8` / `e` | |
 | `timestamp() duration() now` | folded `Cel.Timestamp.mk s n` constants / `Cel.now` | literals fold at codegen; runtime RFC 3339 + duration parsers; `ts - ts`, `ts ± dur`, duration accessors |
@@ -453,6 +456,49 @@ is worth being exact about their reach.
   direction — Go accepts, Lean rejects — is unsound, and that is exactly what
   guard 2 catches.
 
+### Format assurance: what the battery does and does not say
+
+`Protovalidate.Cel.Format` implements protovalidate's well-known string
+formats (`email, hostname, address, ip, ipv4, ipv6, ip_prefix,
+ip_with_prefixlen, host_and_port, uri, uri_ref`) as hand-written grammars.
+Like the regex engine it is *trusted code*: no theorem relates it to the RFCs.
+
+**Enforced.** `//Test:format_corpus_test` compiles `Test/format_corpus.tsv`
+into a module of `#guard`s and Lean re-decides every one at elaboration time.
+The corpus is **upstream protovalidate's own conformance suite** — the
+`cases_is_*.go` / `cases_strings.go` expectations in the `protovalidate` bazel
+module this build already depends on, which are normative for every
+protovalidate runtime — extracted by `cmd/formatcorpus -extract` (a dev-time
+step; the build only reads the TSV). 731 labelled inputs, covering the RFC
+edge cases the suite exercises: trailing dots, all-digit labels, 63/64-char
+labels, IPv6 zone identifiers, bracketed and zone-bearing hosts, IPvFuture,
+percent-encoded UTF-8 in hosts, port ranges, leading zeros, uppercase hex,
+IDN labels, empty parts. Each row is checked through the expression *codegen
+emits* (`x.isIpPrefix 4 true`, the `isHostname || isIp` disjunction
+`string.address` lowers to, the `Cel.regexMatch` calls `string.uuid` /
+`string.tuuid` lower to), so a wrapper-level slip is caught too.
+
+Standing this up found 19 disagreements, all of them bugs on this side — the
+RFC 5322 dot-atom reading of `isEmail` (protovalidate uses the HTML living
+standard's definition), a rejected DNS-root trailing dot, missing RFC 4007
+zone identifiers, first- rather than last-separator splitting in
+`isHostAndPort`, and missing IPvFuture / RFC 6874 zones / percent-encoded-UTF-8
+checking in URI hosts. All are fixed; the corpus is what keeps them fixed.
+
+**Not enforced — do not read more into the battery than this.**
+
+- It is **differential testing against a finite corpus**, not a proof that
+  `Cel.Format` implements the RFCs, and not a proof that it agrees with
+  protovalidate on inputs the corpus does not contain. There is no equivalence
+  theorem and none is claimed.
+- `#guard` is kernel evaluation of a closed `Bool`, not a proof carried in any
+  theorem's axiom closure — a generated `validate_sound` does not depend on it.
+- The corpus is a **vendored snapshot**. It is only as current as the last
+  `-extract` run; nothing in the build detects that upstream added cases.
+- Formats protovalidate has that this repo does not lower at all (`ulid`,
+  `well_known_regex`) are rejected at generation time, so they have no
+  corpus rows.
+
 ## Layout
 
 ```
@@ -466,6 +512,11 @@ Test/                 corpus TSV + genrule compiling every translation with
                       Decidable assertions (build_test) + stand-in msg types.
                       A row's flags may carry `dom=<proto kind>` to supply the
                       descriptor typing the plugin would derive.
+                      format_corpus.tsv holds protovalidate's conformance
+                      expectations for the string formats (see format
+                      assurance above).
+cmd/formatcorpus/     extracts that corpus from an upstream protovalidate
+                      checkout, and renders it as the Lean #guard battery
 examples/shipping/    end-to-end pipeline example + runtime lean_test
 ```
 
@@ -504,5 +555,8 @@ non-generated, option-only proto dependencies such as
    - `float` fields compare at `Float32` precision, CEL at double precision.
 4. No formal relation between `Protovalidate.Cel.Regex` and RE2 beyond the
    per-pattern differential batteries (see
-   [regex assurance](#regex-assurance-what-the-guards-do-and-do-not-say)), and
-   none between `Cel.Format`'s grammars and their RFCs.
+   [regex assurance](#regex-assurance-what-the-guards-do-and-do-not-say)), nor
+   between `Cel.Format`'s grammars and their RFCs beyond the conformance
+   battery (see
+   [format assurance](#format-assurance-what-the-battery-does-and-does-not-say)).
+   Both corpora are vendored snapshots of upstream references.
