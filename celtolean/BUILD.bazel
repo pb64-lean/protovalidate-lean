@@ -6,6 +6,7 @@ go_library(
         "exports.go",
         "functions.go",
         "lean.go",
+        "regexcheck.go",
         "translate.go",
     ],
     importpath = "github.com/petersonbill64/protovalidate-lean/celtolean",
@@ -21,6 +22,9 @@ go_library(
 
 go_test(
     name = "celtolean_test",
-    srcs = ["translate_test.go"],
+    srcs = [
+        "regexcheck_test.go",
+        "translate_test.go",
+    ],
     embed = [":celtolean"],
 )

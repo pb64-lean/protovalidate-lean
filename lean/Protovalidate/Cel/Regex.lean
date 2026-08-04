@@ -328,9 +328,31 @@ def search (prog : Prog) (entry : Nat) (s : String) : Bool :=
 
 end Cel.Regex
 
+/-- Acceptance check for the supported RE2 subset: `true` iff `pattern` parses
+in this engine. Generated code emits a `#guard Cel.Regex.accepts "..."` for
+every literal pattern, so a pattern outside the subset fails the Lean build
+instead of silently matching nothing (which would be unsound under negation:
+`!matches(...)` would degenerate to `true`). -/
+def Cel.Regex.accepts (pattern : String) : Bool :=
+  (Cel.Regex.compile pattern).isOk
+
+-- The acceptance check must agree with the engine on representative patterns;
+-- the Go generator ports this grammar (celtolean/regexcheck.go) and its tests
+-- mirror these expectations.
+#guard Cel.Regex.accepts "^[a-z][a-z0-9-]*$"
+#guard Cel.Regex.accepts "^(cat|dog)$"
+#guard Cel.Regex.accepts "^a{2,3}\\d\\w\\s$"
+#guard !Cel.Regex.accepts "(?i)x"
+#guard !Cel.Regex.accepts "\\bword"
+#guard !Cel.Regex.accepts "(?P<name>a)"
+#guard !Cel.Regex.accepts "a{1000}"
+#guard !Cel.Regex.accepts "[a-"
+
 /-- CEL `matches` (RE2 `PartialMatch`): unanchored regular-expression search.
 Patterns that fail to parse (or use unsupported constructs) match nothing;
-`protoc-gen-lean-protovalidate` validates literal patterns at codegen time. -/
+literal patterns are rejected at codegen time (Go subset check) and guarded at
+Lean compile time (`Cel.Regex.accepts`), so only *dynamic* patterns can reach
+the match-nothing fallback. -/
 def Cel.regexMatch (s : String) (re : String) : Bool :=
   match Cel.Regex.compile re with
   | .ok (prog, entry) => Cel.Regex.search prog entry s

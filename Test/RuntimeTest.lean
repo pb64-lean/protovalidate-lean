@@ -1,3 +1,4 @@
+import Std
 import Protovalidate.Cel
 
 /-!
@@ -11,6 +12,31 @@ open Cel
 def failures : IO.Ref (List String) → String → Bool → Bool → IO Unit :=
   fun ref label got want => do
     if got != want then ref.modify (label :: ·)
+
+/-!
+Guarded-translation shapes exactly as the generator emits them: propositions
+over *runtime* values (function parameters), decided via the dependent-`ite`
+`Decidable` instance. An out-of-range index, missing key, or overflowing
+arithmetic must falsify the proposition — including under negation.
+-/
+
+def guardIdx (a : Array Int32) : Bool :=
+  decide (if h : (a[0]?).isSome then (a[0]?).get h > 5 else False)
+
+def guardIdxNeg (a : Array Int32) : Bool :=
+  decide (if h : (a[0]?).isSome then ¬((a[0]?).get h > 5) else False)
+
+def guardKey (m : Std.HashMap String String) : Bool :=
+  decide (if h : (m["env"]?).isSome then (m["env"]?).get h = "prod" else False)
+
+def guardKeyNe (m : Std.HashMap String String) : Bool :=
+  decide (if h : (m["env"]?).isSome then (m["env"]?).get h ≠ "prod" else False)
+
+def guardAdd (x : Int64) : Bool :=
+  decide (if h : Cel.addOk x 1 then x + 1 > 0 else False)
+
+def guardMul (x : Int64) : Bool :=
+  decide (if h : Cel.mulOk x 2 then x * 2 = 42 else False)
 
 def main : IO Unit := do
   let bad ← IO.mkRef ([] : List String)
@@ -30,6 +56,61 @@ def main : IO Unit := do
     "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$") true
   ck "re: pathological terminates" (regexMatch "aaaaaaaaaaaaaaaaaaaac" "(a*)*b$") false
   ck "re: invalid pattern" (regexMatch "x" "(?i)x") false
+
+  -- regex acceptance (mirrors the Go subset check in celtolean/regexcheck.go;
+  -- keep this list in sync with TestRegexAccepted)
+  ck "re acc: literal" (Cel.Regex.accepts "abc") true
+  ck "re acc: class range esc" (Cel.Regex.accepts "^[a-z0-9_.\\-]+$") true
+  ck "re acc: perl classes" (Cel.Regex.accepts "\\d\\D\\w\\W\\s\\S") true
+  ck "re acc: hex escapes" (Cel.Regex.accepts "\\x41\\x{1F600}") true
+  ck "re acc: bounds" (Cel.Regex.accepts "a{2}b{3,}c{4,5}") true
+  ck "re acc: groups alt" (Cel.Regex.accepts "(?:ab|cd)+(e|f)?") true
+  ck "re acc: literal brace" (Cel.Regex.accepts "a{b") true
+  ck "re acc: class lead bracket" (Cel.Regex.accepts "[]a]") true
+  ck "re acc: trailing dash" (Cel.Regex.accepts "[a-]") true
+  ck "re acc: flags" (Cel.Regex.accepts "(?i)x") false
+  ck "re acc: word boundary" (Cel.Regex.accepts "\\bx") false
+  ck "re acc: named group" (Cel.Regex.accepts "(?P<n>x)") false
+  -- The Lean parser reads "[[:alpha:]]" as literal chars; RE2 reads a POSIX
+  -- class. The Go gate rejects POSIX classes so the divergence cannot ship.
+  ck "re acc: posix class parses as chars" (Cel.Regex.accepts "[[:alpha:]]") true
+  ck "re acc: big bound" (Cel.Regex.accepts "a{513}") false
+  ck "re acc: bad bounds" (Cel.Regex.accepts "a{3,2}") false
+  ck "re acc: unterminated class" (Cel.Regex.accepts "[abc") false
+  ck "re acc: unterminated group" (Cel.Regex.accepts "(ab") false
+  ck "re acc: stray paren" (Cel.Regex.accepts "ab)") false
+  ck "re acc: trailing backslash" (Cel.Regex.accepts "ab\\") false
+  ck "re acc: bad escape" (Cel.Regex.accepts "\\q") false
+  ck "re acc: lone quantifier" (Cel.Regex.accepts "*a") false
+
+  -- CEL arithmetic error side-conditions (overflow ⇒ rule fails)
+  ck "arith: i64 add max" (Cel.addOk (9223372036854775807 : Int64) 1) false
+  ck "arith: i64 add ok" (Cel.addOk (9223372036854775806 : Int64) 1) true
+  ck "arith: i64 sub min" (Cel.subOk (-9223372036854775808 : Int64) 1) false
+  ck "arith: i64 mul over" (Cel.mulOk (4611686018427387904 : Int64) 2) false
+  ck "arith: i64 neg min" (Cel.negOk (-9223372036854775808 : Int64)) false
+  ck "arith: i64 neg ok" (Cel.negOk (-9223372036854775807 : Int64)) true
+  ck "arith: u64 sub under" (Cel.subOk (0 : UInt64) 1) false
+  ck "arith: u64 add max" (Cel.addOk (18446744073709551615 : UInt64) 1) false
+  ck "arith: u64 mul ok" (Cel.mulOk (3 : UInt64) 5) true
+  ck "arith: i32 mul over" (Cel.mulOk (2000000000 : Int32) 2) false
+  ck "arith: i32 add ok" (Cel.addOk (2147483646 : Int32) 1) true
+  ck "arith: u32 add over" (Cel.addOk (4294967295 : UInt32) 1) false
+  ck "arith: nat sub under" (Cel.subOk (0 : Nat) 1) false
+  ck "arith: nat sub ok" (Cel.subOk (1 : Nat) 1) true
+  ck "arith: string concat total" (Cel.addOk "a" "b") true
+
+  -- guarded translations decide with CEL error semantics: an out-of-range
+  -- index or overflowing arithmetic falsifies the guarded proposition
+  ck "guard: index in range" (guardIdx #[7, 8]) true
+  ck "guard: index oob fails" (guardIdx #[]) false
+  ck "guard: index oob fails under negation" (guardIdxNeg #[]) false
+  ck "guard: index negation in range" (guardIdxNeg #[3]) true
+  ck "guard: map key present" (guardKey (Std.HashMap.ofList [("env", "prod")])) true
+  ck "guard: map key missing fails" (guardKey (Std.HashMap.ofList [])) false
+  ck "guard: map key missing fails under ne" (guardKeyNe (Std.HashMap.ofList [])) false
+  ck "guard: overflow falsifies" (guardAdd 9223372036854775807) false
+  ck "guard: in-range arithmetic exact" (guardMul 21) true
 
   -- hostnames / emails
   ck "hostname" "example.com".isHostname true

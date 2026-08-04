@@ -149,6 +149,122 @@ instance : ToBool Bool := ⟨id⟩
 instance : ToBool String :=
   ⟨fun s => s == "1" || s == "t" || s == "true" || s == "TRUE" || s == "True"⟩
 
+/-! ## Arithmetic error side-conditions (CEL overflow semantics)
+
+CEL integer arithmetic is 64-bit and *errors* on overflow — and an erroring
+rule is not satisfied — while Lean's fixed-width arithmetic wraps. The
+translator therefore guards every `+`/`-`/`*`/unary `-` whose result could
+diverge with an `ArithOk`/`NegOk` side-condition: the guard computes the exact
+result in unbounded `Int`/`Nat` and demands it stays in the CEL domain, so an
+overflowing evaluation makes the guarded proposition `False` (matching
+error ⇒ fail). Types whose CEL arithmetic cannot error (floats, string/bytes/
+list concatenation, timestamp/duration in this model) use the default `true`
+conditions.
+
+For `Int32`/`UInt32` fields the guard demands the result fits the *32-bit*
+type: CEL itself computes in 64 bits, so this is conservatively stricter (an
+intermediate in `(2^31, 2^63)` fails here but not in CEL) — sound, never
+accepting a value CEL rejects. `Nat` (the type of `size()` results) cannot
+overflow in Lean, but its subtraction truncates at zero where CEL goes
+negative, hence `subOk := b ≤ a`. Division and modulo are unguarded: their
+Lean semantics on the fixed-width types already agree with CEL in-range. -/
+
+/-- Homogeneous arithmetic side-conditions for one operand type. -/
+class HomArithOk (α : Type u) where
+  addOk : α → α → Bool := fun _ _ => true
+  subOk : α → α → Bool := fun _ _ => true
+  mulOk : α → α → Bool := fun _ _ => true
+
+/-- Deciding a guarded proposition `if h : g then P h else False` (the shape
+the translator emits for indexing bounds and arithmetic side-conditions):
+decide the guard first and only touch the branch that is actually taken. -/
+instance (priority := high) {c : Prop} {t : c → Prop} {e : ¬c → Prop} [dc : Decidable c]
+    [dt : (h : c) → Decidable (t h)] [de : (h : ¬c) → Decidable (e h)] :
+    Decidable (dite c t e) :=
+  match dc with
+  | .isTrue h => dt h
+  | .isFalse h => de h
+
+/-- Heterogeneous dispatch (mirrors `HAdd`/`HSub` mixes such as
+timestamp ± duration). The homogeneous bridge below is a `default_instance`,
+so a literal operand's still-unknown type defaults to the anchored operand's
+type (`Cel.mulOk x 2` types `2` from `x`). -/
+class ArithOk (α : Type u) (β : Type v) where
+  addOk : α → β → Bool := fun _ _ => true
+  subOk : α → β → Bool := fun _ _ => true
+  mulOk : α → β → Bool := fun _ _ => true
+
+@[default_instance] instance [HomArithOk α] : ArithOk α α where
+  addOk := HomArithOk.addOk
+  subOk := HomArithOk.subOk
+  mulOk := HomArithOk.mulOk
+
+class NegOk (α : Type u) where
+  negOk : α → Bool := fun _ => true
+
+/-- CEL `a + b` evaluates without error. -/
+def addOk [ArithOk α β] (a : α) (b : β) : Bool := ArithOk.addOk a b
+/-- CEL `a - b` evaluates without error. -/
+def subOk [ArithOk α β] (a : α) (b : β) : Bool := ArithOk.subOk a b
+/-- CEL `a * b` evaluates without error. -/
+def mulOk [ArithOk α β] (a : α) (b : β) : Bool := ArithOk.mulOk a b
+/-- CEL `-a` evaluates without error. -/
+def negOk [NegOk α] (a : α) : Bool := NegOk.negOk a
+
+def int64Range (r : Int) : Bool :=
+  Int64.minValue.toInt ≤ r && r ≤ Int64.maxValue.toInt
+
+def int32Range (r : Int) : Bool :=
+  Int32.minValue.toInt ≤ r && r ≤ Int32.maxValue.toInt
+
+instance : HomArithOk Int64 where
+  addOk a b := int64Range (a.toInt + b.toInt)
+  subOk a b := int64Range (a.toInt - b.toInt)
+  mulOk a b := int64Range (a.toInt * b.toInt)
+
+instance : NegOk Int64 where
+  negOk a := int64Range (-a.toInt)
+
+instance : HomArithOk Int32 where
+  addOk a b := int32Range (a.toInt + b.toInt)
+  subOk a b := int32Range (a.toInt - b.toInt)
+  mulOk a b := int32Range (a.toInt * b.toInt)
+
+instance : NegOk Int32 where
+  negOk a := int32Range (-a.toInt)
+
+instance : HomArithOk UInt64 where
+  addOk a b := decide (a.toNat + b.toNat < 2 ^ 64)
+  subOk a b := decide (b ≤ a)
+  mulOk a b := decide (a.toNat * b.toNat < 2 ^ 64)
+
+instance : HomArithOk UInt32 where
+  addOk a b := decide (a.toNat + b.toNat < 2 ^ 32)
+  subOk a b := decide (b ≤ a)
+  mulOk a b := decide (a.toNat * b.toNat < 2 ^ 32)
+
+/-- `Nat` results (`size()`): Lean `Nat` cannot overflow (and real sizes stay
+far below 2^63), but truncating subtraction must fail where CEL goes negative. -/
+instance : HomArithOk Nat where
+  subOk a b := decide (b ≤ a)
+
+instance : HomArithOk Float := {}
+instance : NegOk Float := {}
+instance : HomArithOk Float32 := {}
+instance : NegOk Float32 := {}
+instance : HomArithOk String := {}
+instance : HomArithOk ByteArray := {}
+instance : HomArithOk (List α) := {}
+instance : HomArithOk (Array α) := {}
+
+/-- Timestamp/duration arithmetic is total in this model (`Cel.Time` computes
+in unbounded total nanoseconds); CEL's own range errors are out of scope. -/
+instance : HomArithOk Timestamp := {}
+instance : ArithOk Timestamp Duration := {}
+instance : ArithOk Duration Timestamp := {}
+instance : HomArithOk Duration := {}
+instance : NegOk Duration := {}
+
 end Cel
 
 /-! ## protovalidate string predicates (dot notation)
