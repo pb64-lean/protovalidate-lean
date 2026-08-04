@@ -40,14 +40,37 @@ lean_protovalidate_library(
 # Compile-time audit of the generated soundness/completeness theorems: they
 # must exist, be theorems, and depend on no axiom beyond the standard three
 # (in particular no sorryAx) anywhere in the generated modules.
+#
+# The scheme these instantiate is audited separately by
+# //lean:runtime_assurance (the generic Decision lemmas).
 lean_assurance_test(
     name = "shipping_valid_assurance",
     principal_theorems = [
         "shipping.v1.Valid.Order.validate_sound",
         "shipping.v1.Valid.Order.validate_complete",
         "shipping.v1.Valid.Order.decodeValid_sound",
+        "shipping.v1.Valid.Item.validate_sound",
+        "shipping.v1.Valid.Item.validate_complete",
+        "shipping.v1.Valid.Item.decodeValid_sound",
+        "shipping.v1.Valid.Order.payer_Type.validate_sound",
+        "shipping.v1.Valid.Order.payer_Type.validate_complete",
+    ],
+    deps = [":shipping_valid"],
+)
+
+# The inventory example (catalog.v1): the standard-rule vocabulary, enum and
+# map/repeated element rules, ignore-zero escapes, and a validated oneof sum.
+lean_assurance_test(
+    name = "inventory_valid_assurance",
+    principal_theorems = [
         "catalog.v1.Valid.Product.validate_sound",
+        "catalog.v1.Valid.Product.validate_complete",
+        "catalog.v1.Valid.Product.decodeValid_sound",
+        "catalog.v1.Valid.Payment.validate_sound",
         "catalog.v1.Valid.Payment.validate_complete",
+        "catalog.v1.Valid.Payment.decodeValid_sound",
+        "catalog.v1.Valid.Payment.method_Type.validate_sound",
+        "catalog.v1.Valid.Payment.method_Type.validate_complete",
     ],
     deps = [":shipping_valid"],
 )

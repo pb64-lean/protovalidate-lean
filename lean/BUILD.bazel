@@ -7,7 +7,7 @@ Starlark package protovalidate/ would collide with a top-level Protovalidate/
 directory on case-insensitive filesystems.
 """
 
-load("@rules_lean//lean:defs.bzl", "lean_library")
+load("@rules_lean//lean:defs.bzl", "lean_assurance_test", "lean_library")
 
 package(default_visibility = ["//visibility:public"])
 
@@ -32,4 +32,30 @@ lean_library(
     name = "protovalidate_runtime",
     srcs = ["Protovalidate/Runtime.lean"],
     strip_module_prefix = "lean",
+)
+
+# Compile-time audit of the proof scheme itself. Every generated
+# validate_sound / validate_complete / decodeValid_sound is a one-line instance
+# of a lemma below, so this is the root of trust the per-message audits stand
+# on: the lemmas must exist, be theorems, and close over no axiom beyond the
+# standard three (in particular no sorryAx) — and neither may anything else in
+# the runtime the generated propositions are stated over.
+lean_assurance_test(
+    name = "runtime_assurance",
+    principal_theorems = [
+        # The generic soundness/completeness lemmas every generated theorem
+        # instantiates.
+        "Protovalidate.Decision.pred_of_toExcept_ok",
+        "Protovalidate.Decision.toExcept_isOk",
+        "Protovalidate.decodeThenValidate_sound",
+        # The presence-rule plumbing generated ValidPred conjuncts are built
+        # from.
+        "Protovalidate.someHolds_none",
+        "Protovalidate.someHolds_self",
+        "Protovalidate.not_isSome_none",
+    ],
+    deps = [
+        ":protovalidate_cel",
+        ":protovalidate_runtime",
+    ],
 )
