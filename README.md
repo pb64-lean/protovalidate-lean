@@ -58,12 +58,44 @@ base types. For every message with protovalidate rules it emits, in a parallel
 - a **structure** whose annotated fields are subtypes of the base field types
   and whose message-level rules are dependent Prop fields over the value
   fields;
+- **`ValidPred : Base → Prop`**, the declarative validity predicate: a Prop
+  structure with one field per rule conjunct, phrased over the *base* value;
 - **`validate : Base → Except Protovalidate.Violation Valid`**, deciding each
-  rule (nested `if h : _` chains, so the proofs flow into the structure) or
-  reporting the first violation with its rule id;
+  rule (an evidence-carrying `Decision (ValidPred b)` under the hood, so the
+  proofs flow into the structure) or reporting the first violation with its
+  rule id, plus a `Decidable (ValidPred b)` instance;
+- kernel-checked **soundness/completeness theorems** tying the two together
+  (see below);
 - **`toBase : Valid → Base`**, forgetting refinements;
 - **`decodeValid : ByteArray → Except String Valid`**, composing the base
   wire decoder with validation.
+
+### Soundness and completeness theorems
+
+Every generated message additionally carries `M.ValidPred : Base → Prop` — a
+declarative Prop structure with one named field per rule conjunct (presence
+conjuncts for `required` Option shapes, `∀ x, b.f = some x → …` for optional
+rules, `∀ x ∈ b.f, Elem.ValidPred x` for repeated-message elements, nested
+`ValidPred`s for embedded messages, and the message-level CEL Props) — and
+kernel-checked theorems relating it to the procedural validator:
+
+```lean
+theorem M.validate_sound    : M.validate b = .ok v → M.ValidPred b
+theorem M.validate_complete : M.ValidPred b → (M.validate b).isOk
+theorem M.decodeValid_sound : M.decodeValid bytes = .ok v →
+    ∃ b, Base.decode bytes = .ok b ∧ M.validate b = .ok v
+```
+
+The scheme: `M.checkPred b : Protovalidate.Decision (M.ValidPred b)` decides
+the whole predicate at once — each step either extends the proof or refutes
+it while reporting the first violation in protovalidate rule order — and
+`validate` is its `Except` view, so the theorems are instances of two generic
+`Decision` lemmas with no per-message proof search. Soundness hands back the
+conjuncts over the *input* base value (`(M.validate_sound h).items_elems`),
+which downstream code can project and rewrite along without re-running any
+checks. `Test/PredSchemeTest.lean` keeps a hand-written mirror of the emission
+scheme compiling, and the example's `lean_assurance_test` audits the generated
+theorems' axiom closure (no `sorryAx`, standard axioms only) at compile time.
 
 ### Standard rules
 
