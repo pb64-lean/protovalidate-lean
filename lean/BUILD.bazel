@@ -52,6 +52,31 @@ lean_library(
 # the runtime the generated propositions are stated over.
 lean_assurance_test(
     name = "runtime_assurance",
+    allowed_axioms = [
+        "propext",
+        "Classical.choice",
+        "Quot.sound",
+    ],
+    expected_extern_declarations = {},
+    expected_implemented_by = {},
+    expected_native_targets = [],
+    expected_opaque_constants = ["Cel.now"],
+    expected_partial_definitions = [],
+    expected_unsafe_constants = [],
+    module_prefixes = [
+        "Protovalidate.Cel",
+        "Protovalidate.Runtime",
+    ],
+    policy_mode = "exact",
+    principal_theorem_types = {
+        "Protovalidate.Decision.pred_of_toExcept_ok": "∀ {p : Prop} {α : Type _} {d : Protovalidate.Decision p} {mk : p → α} {v : α}, d.toExcept mk = Except.ok v → p",
+        "Protovalidate.Decision.toExcept_isOk": "∀ {p : Prop} {α : Type _} {d : Protovalidate.Decision p} {mk : p → α}, p → (d.toExcept mk).isOk",
+        "Protovalidate.decodeThenValidate_sound": "∀ {ε : Type _} {α β : Type _} [ToString ε] {dec : ByteArray → Except ε α} {val : α → Except Protovalidate.Violation β} {bytes : ByteArray} {out : β}, Protovalidate.decodeThenValidate dec val bytes = Except.ok out → ∃ base, dec bytes = Except.ok base ∧ val base = Except.ok out",
+        "Protovalidate.not_isSome_none": "∀ {α : Type _}, ¬(none : Option α).isSome",
+        "Protovalidate.size_mapArray": "∀ {α : Type _} {β : Type _} {p : α → Prop} (xs : Array α) (mk : (x : α) → p x → β) (hp : ∀ x, x ∈ xs → p x), (Protovalidate.mapArray xs mk hp).size = xs.size",
+        "Protovalidate.someHolds_none": "∀ {α : Type _} {p : α → Prop} (x : α), (none : Option α) = some x → p x",
+        "Protovalidate.someHolds_self": "∀ {α : Type _} {p : α → Prop} {v : α}, p v → ∀ x, some v = some x → p x",
+    },
     principal_theorems = [
         # The generic soundness/completeness lemmas every generated theorem
         # instantiates.
@@ -78,6 +103,28 @@ lean_assurance_test(
 # host-bit masking assumes exactly it.
 lean_assurance_test(
     name = "format_laws_assurance",
+    allowed_axioms = [
+        "propext",
+        "Classical.choice",
+        "Quot.sound",
+    ],
+    expected_extern_declarations = {},
+    expected_implemented_by = {},
+    expected_native_targets = [],
+    expected_opaque_constants = [],
+    expected_partial_definitions = [],
+    expected_unsafe_constants = [],
+    module_prefixes = ["Protovalidate.Cel.FormatLaws"],
+    policy_mode = "exact",
+    principal_theorem_types = {
+        "Cel.Format.ipv4Octet?_le_255": "∀ {part : String} {value : Nat}, Cel.Format.ipv4Octet? part = some value → value ≤ 255",
+        "Cel.Format.ipv4Value?_length": "∀ {s : String} {value : Nat}, Cel.Format.ipv4Value? s = some value → (s.splitOn \".\").length = 4",
+        "Cel.Format.ipv4Value?_lt": "∀ {s : String} {value : Nat}, Cel.Format.ipv4Value? s = some value → value < 2 ^ 32",
+        "Cel.Format.isHostname_length": "∀ {s : String}, Cel.Format.isHostname s = true → s.length ≤ 253",
+        "Cel.Format.isIp_version": "∀ {s : String} {version : Int}, Cel.Format.isIp s version = true → version = 0 ∨ version = 4 ∨ version = 6",
+        "Cel.Format.isIpv4_splitOn_length": "∀ {s : String}, Cel.Format.isIpv4 s = true → (s.splitOn \".\").length = 4",
+        "Cel.Format.isPort_le": "∀ {s : String}, Cel.Format.isPort s = true → s.toList.foldl (fun acc c => acc * 10 + (c.toNat - 48)) 0 ≤ 65535",
+    },
     principal_theorems = [
         "Cel.Format.ipv4Value?_lt",
         "Cel.Format.ipv4Octet?_le_255",

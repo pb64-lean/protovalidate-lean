@@ -1,0 +1,297 @@
+diff --git a/proto/protovalidate-testing/buf/validate/conformance/cases/BUILD.bazel b/proto/protovalidate-testing/buf/validate/conformance/cases/BUILD.bazel
+--- a/proto/protovalidate-testing/buf/validate/conformance/cases/BUILD.bazel
++++ b/proto/protovalidate-testing/buf/validate/conformance/cases/BUILD.bazel
+@@ -16,6 +16,33 @@ load("@com_google_protobuf//bazel:cc_proto_library.bzl", "cc_proto_library")
+ load("@rules_buf//buf:defs.bzl", "buf_lint_test")
+ load("@rules_proto//proto:defs.bzl", "proto_library")
+ 
++exports_files(
++    glob(["*.proto"]),
++    visibility = ["//visibility:public"],
++)
++
++filegroup(
++    name = "lean_all_case_sources",
++    srcs = glob(["*.proto"]),
++    visibility = ["//visibility:public"],
++)
++
++proto_library(
++    name = "lean_supported_cases_proto",
++    srcs = [
++        "bool.proto",
++        "filename-with-dash.proto",
++    ],
++    strip_import_prefix = "/proto/protovalidate-testing",
++    visibility = ["//visibility:public"],
++    deps = [
++        "//proto/protovalidate/buf/validate:validate_proto",
++        "@com_google_protobuf//:duration_proto",
++        "@com_google_protobuf//:timestamp_proto",
++        "@com_google_protobuf//:wrappers_proto",
++    ],
++)
++
+ proto_library(
+     name = "buf_validate_conformance_cases_proto",
+     srcs = [
+diff --git a/tools/internal/gen/buf/validate/BUILD.bazel b/tools/internal/gen/buf/validate/BUILD.bazel
+new file mode 100644
+--- /dev/null
++++ b/tools/internal/gen/buf/validate/BUILD.bazel
+@@ -0,0 +1,16 @@
++load("@io_bazel_rules_go//go:def.bzl", "go_library")
++
++go_library(
++    name = "validate",
++    srcs = ["validate.pb.go"],
++    importpath = "github.com/bufbuild/protovalidate/tools/internal/gen/buf/validate",
++    visibility = ["//:__subpackages__"],
++    deps = [
++        "@org_golang_google_protobuf//reflect/protoreflect:go_default_library",
++        "@org_golang_google_protobuf//runtime/protoimpl:go_default_library",
++        "@org_golang_google_protobuf//types/descriptorpb:go_default_library",
++        "@org_golang_google_protobuf//types/known/durationpb:go_default_library",
++        "@org_golang_google_protobuf//types/known/fieldmaskpb:go_default_library",
++        "@org_golang_google_protobuf//types/known/timestamppb:go_default_library",
++    ],
++)
+diff --git a/tools/internal/gen/buf/validate/conformance/cases/BUILD.bazel b/tools/internal/gen/buf/validate/conformance/cases/BUILD.bazel
+new file mode 100644
+--- /dev/null
++++ b/tools/internal/gen/buf/validate/conformance/cases/BUILD.bazel
+@@ -0,0 +1,53 @@
++load("@io_bazel_rules_go//go:def.bzl", "go_library")
++
++go_library(
++    name = "cases",
++    srcs = [
++        "bool.pb.go",
++        "bytes.pb.go",
++        "enums.pb.go",
++        "filename-with-dash.pb.go",
++        "groups_editions.pb.go",
++        "groups_proto2.pb.go",
++        "ignore_empty_proto2.pb.go",
++        "ignore_empty_proto3.pb.go",
++        "ignore_empty_proto_editions.pb.go",
++        "ignore_proto2.pb.go",
++        "ignore_proto3.pb.go",
++        "ignore_proto_editions.pb.go",
++        "kitchen_sink.pb.go",
++        "library.pb.go",
++        "maps.pb.go",
++        "messages.pb.go",
++        "numbers.pb.go",
++        "oneofs.pb.go",
++        "predefined_rules_proto2.pb.go",
++        "predefined_rules_proto3.pb.go",
++        "predefined_rules_proto_editions.pb.go",
++        "repeated.pb.go",
++        "required_field_proto2.pb.go",
++        "required_field_proto3.pb.go",
++        "required_field_proto_editions.pb.go",
++        "strings.pb.go",
++        "wkt_any.pb.go",
++        "wkt_duration.pb.go",
++        "wkt_field_mask.pb.go",
++        "wkt_nested.pb.go",
++        "wkt_timestamp.pb.go",
++        "wkt_wrappers.pb.go",
++    ],
++    importpath = "github.com/bufbuild/protovalidate/tools/internal/gen/buf/validate/conformance/cases",
++    visibility = ["//:__subpackages__"],
++    deps = [
++        "//tools/internal/gen/buf/validate",
++        "//tools/internal/gen/buf/validate/conformance/cases/other_package",
++        "//tools/internal/gen/buf/validate/conformance/cases/yet_another_package",
++        "@org_golang_google_protobuf//reflect/protoreflect:go_default_library",
++        "@org_golang_google_protobuf//runtime/protoimpl:go_default_library",
++        "@org_golang_google_protobuf//types/known/anypb:go_default_library",
++        "@org_golang_google_protobuf//types/known/durationpb:go_default_library",
++        "@org_golang_google_protobuf//types/known/fieldmaskpb:go_default_library",
++        "@org_golang_google_protobuf//types/known/timestamppb:go_default_library",
++        "@org_golang_google_protobuf//types/known/wrapperspb:go_default_library",
++    ],
++)
+diff --git a/tools/internal/gen/buf/validate/conformance/cases/custom_rules/BUILD.bazel b/tools/internal/gen/buf/validate/conformance/cases/custom_rules/BUILD.bazel
+new file mode 100644
+--- /dev/null
++++ b/tools/internal/gen/buf/validate/conformance/cases/custom_rules/BUILD.bazel
+@@ -0,0 +1,12 @@
++load("@io_bazel_rules_go//go:def.bzl", "go_library")
++go_library(
++    name = "custom_rules",
++    srcs = ["custom_rules.pb.go"],
++    importpath = "github.com/bufbuild/protovalidate/tools/internal/gen/buf/validate/conformance/cases/custom_rules",
++    visibility = ["//:__subpackages__"],
++    deps = [
++        "//tools/internal/gen/buf/validate",
++        "@org_golang_google_protobuf//reflect/protoreflect:go_default_library",
++        "@org_golang_google_protobuf//runtime/protoimpl:go_default_library",
++    ],
++)
+diff --git a/tools/internal/gen/buf/validate/conformance/cases/other_package/BUILD.bazel b/tools/internal/gen/buf/validate/conformance/cases/other_package/BUILD.bazel
+new file mode 100644
+--- /dev/null
++++ b/tools/internal/gen/buf/validate/conformance/cases/other_package/BUILD.bazel
+@@ -0,0 +1,12 @@
++load("@io_bazel_rules_go//go:def.bzl", "go_library")
++go_library(
++    name = "other_package",
++    srcs = ["embed.pb.go"],
++    importpath = "github.com/bufbuild/protovalidate/tools/internal/gen/buf/validate/conformance/cases/other_package",
++    visibility = ["//:__subpackages__"],
++    deps = [
++        "//tools/internal/gen/buf/validate",
++        "@org_golang_google_protobuf//reflect/protoreflect:go_default_library",
++        "@org_golang_google_protobuf//runtime/protoimpl:go_default_library",
++    ],
++)
+diff --git a/tools/internal/gen/buf/validate/conformance/cases/yet_another_package/BUILD.bazel b/tools/internal/gen/buf/validate/conformance/cases/yet_another_package/BUILD.bazel
+new file mode 100644
+--- /dev/null
++++ b/tools/internal/gen/buf/validate/conformance/cases/yet_another_package/BUILD.bazel
+@@ -0,0 +1,12 @@
++load("@io_bazel_rules_go//go:def.bzl", "go_library")
++go_library(
++    name = "yet_another_package",
++    srcs = ["embed2.pb.go"],
++    importpath = "github.com/bufbuild/protovalidate/tools/internal/gen/buf/validate/conformance/cases/yet_another_package",
++    visibility = ["//:__subpackages__"],
++    deps = [
++        "//tools/internal/gen/buf/validate",
++        "@org_golang_google_protobuf//reflect/protoreflect:go_default_library",
++        "@org_golang_google_protobuf//runtime/protoimpl:go_default_library",
++    ],
++)
+diff --git a/tools/internal/gen/buf/validate/conformance/harness/BUILD.bazel b/tools/internal/gen/buf/validate/conformance/harness/BUILD.bazel
+new file mode 100644
+--- /dev/null
++++ b/tools/internal/gen/buf/validate/conformance/harness/BUILD.bazel
+@@ -0,0 +1,14 @@
++load("@io_bazel_rules_go//go:def.bzl", "go_library")
++go_library(
++    name = "harness",
++    srcs = ["harness.pb.go", "results.pb.go"],
++    importpath = "github.com/bufbuild/protovalidate/tools/internal/gen/buf/validate/conformance/harness",
++    visibility = ["//:__subpackages__"],
++    deps = [
++        "//tools/internal/gen/buf/validate",
++        "@org_golang_google_protobuf//reflect/protoreflect:go_default_library",
++        "@org_golang_google_protobuf//runtime/protoimpl:go_default_library",
++        "@org_golang_google_protobuf//types/descriptorpb:go_default_library",
++        "@org_golang_google_protobuf//types/known/anypb:go_default_library",
++    ],
++)
+diff --git a/tools/protovalidate-conformance/BUILD.bazel b/tools/protovalidate-conformance/BUILD.bazel
+new file mode 100644
+--- /dev/null
++++ b/tools/protovalidate-conformance/BUILD.bazel
+@@ -0,0 +1,21 @@
++load("@io_bazel_rules_go//go:def.bzl", "go_binary", "go_library")
++go_library(
++    name = "protovalidate-conformance_lib",
++    srcs = ["command.go", "config.go", "main.go"],
++    importpath = "github.com/bufbuild/protovalidate/tools/protovalidate-conformance",
++    visibility = ["//visibility:private"],
++    deps = [
++        "//tools/internal/gen/buf/validate/conformance/harness",
++        "//tools/protovalidate-conformance/internal/cases",
++        "//tools/protovalidate-conformance/internal/results",
++        "//tools/protovalidate-conformance/internal/suites",
++        "@com_github_spf13_pflag//:go_default_library",
++        "@in_gopkg_yaml_v3//:go_default_library",
++        "@org_golang_google_protobuf//proto:go_default_library",
++    ],
++)
++go_binary(
++    name = "protovalidate-conformance",
++    embed = [":protovalidate-conformance_lib"],
++    visibility = ["//visibility:public"],
++)
+diff --git a/tools/protovalidate-conformance/internal/cases/BUILD.bazel b/tools/protovalidate-conformance/internal/cases/BUILD.bazel
+new file mode 100644
+--- /dev/null
++++ b/tools/protovalidate-conformance/internal/cases/BUILD.bazel
+@@ -0,0 +1,21 @@
++load("@io_bazel_rules_go//go:def.bzl", "go_library")
++go_library(
++    name = "cases",
++    srcs = glob(["*.go"], exclude = ["*_test.go"]),
++    importpath = "github.com/bufbuild/protovalidate/tools/protovalidate-conformance/internal/cases",
++    visibility = ["//tools/protovalidate-conformance:__subpackages__"],
++    deps = [
++        "//tools/internal/gen/buf/validate",
++        "//tools/internal/gen/buf/validate/conformance/cases",
++        "//tools/internal/gen/buf/validate/conformance/cases/custom_rules",
++        "//tools/internal/gen/buf/validate/conformance/cases/other_package",
++        "//tools/protovalidate-conformance/internal/results",
++        "//tools/protovalidate-conformance/internal/suites",
++        "@org_golang_google_protobuf//proto:go_default_library",
++        "@org_golang_google_protobuf//types/known/anypb:go_default_library",
++        "@org_golang_google_protobuf//types/known/durationpb:go_default_library",
++        "@org_golang_google_protobuf//types/known/fieldmaskpb:go_default_library",
++        "@org_golang_google_protobuf//types/known/timestamppb:go_default_library",
++        "@org_golang_google_protobuf//types/known/wrapperspb:go_default_library",
++    ],
++)
+diff --git a/tools/protovalidate-conformance/internal/fieldpath/BUILD.bazel b/tools/protovalidate-conformance/internal/fieldpath/BUILD.bazel
+new file mode 100644
+--- /dev/null
++++ b/tools/protovalidate-conformance/internal/fieldpath/BUILD.bazel
+@@ -0,0 +1,14 @@
++load("@io_bazel_rules_go//go:def.bzl", "go_library")
++go_library(
++    name = "fieldpath",
++    srcs = ["fieldpath.go"],
++    importpath = "github.com/bufbuild/protovalidate/tools/protovalidate-conformance/internal/fieldpath",
++    visibility = ["//tools/protovalidate-conformance:__subpackages__"],
++    deps = [
++        "//tools/internal/gen/buf/validate",
++        "@org_golang_google_protobuf//proto:go_default_library",
++        "@org_golang_google_protobuf//reflect/protoreflect:go_default_library",
++        "@org_golang_google_protobuf//reflect/protoregistry:go_default_library",
++        "@org_golang_google_protobuf//types/descriptorpb:go_default_library",
++    ],
++)
+diff --git a/tools/protovalidate-conformance/internal/results/BUILD.bazel b/tools/protovalidate-conformance/internal/results/BUILD.bazel
+new file mode 100644
+--- /dev/null
++++ b/tools/protovalidate-conformance/internal/results/BUILD.bazel
+@@ -0,0 +1,14 @@
++load("@io_bazel_rules_go//go:def.bzl", "go_library")
++go_library(
++    name = "results",
++    srcs = ["result.go", "set.go"],
++    importpath = "github.com/bufbuild/protovalidate/tools/protovalidate-conformance/internal/results",
++    visibility = ["//tools/protovalidate-conformance:__subpackages__"],
++    deps = [
++        "//tools/internal/gen/buf/validate",
++        "//tools/internal/gen/buf/validate/conformance/harness",
++        "//tools/protovalidate-conformance/internal/fieldpath",
++        "@org_golang_google_protobuf//proto:go_default_library",
++        "@org_golang_google_protobuf//reflect/protoreflect:go_default_library",
++    ],
++)
+diff --git a/tools/protovalidate-conformance/internal/suites/BUILD.bazel b/tools/protovalidate-conformance/internal/suites/BUILD.bazel
+new file mode 100644
+--- /dev/null
++++ b/tools/protovalidate-conformance/internal/suites/BUILD.bazel
+@@ -0,0 +1,16 @@
++load("@io_bazel_rules_go//go:def.bzl", "go_library")
++go_library(
++    name = "suites",
++    srcs = ["benchmark.go", "suite.go"],
++    importpath = "github.com/bufbuild/protovalidate/tools/protovalidate-conformance/internal/suites",
++    visibility = ["//tools/protovalidate-conformance:__subpackages__"],
++    deps = [
++        "//tools/internal/gen/buf/validate/conformance/harness",
++        "//tools/protovalidate-conformance/internal/results",
++        "@org_golang_google_protobuf//proto:go_default_library",
++        "@org_golang_google_protobuf//reflect/protodesc:go_default_library",
++        "@org_golang_google_protobuf//reflect/protoreflect:go_default_library",
++        "@org_golang_google_protobuf//types/descriptorpb:go_default_library",
++        "@org_golang_google_protobuf//types/known/anypb:go_default_library",
++    ],
++)

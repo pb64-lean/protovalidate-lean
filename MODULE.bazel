@@ -56,6 +56,13 @@ bazel_dep(name = "protobuf", version = "33.4")
 
 # buf.validate proto definitions (validate.proto) for annotated protos.
 bazel_dep(name = "protovalidate", version = "1.2.2")
+single_version_override(
+    module_name = "protovalidate",
+    patch_strip = 1,
+    patches = ["//third_party:protovalidate_tools_build.patch"],
+    version = "1.2.2",
+)
+
 bazel_dep(name = "bazel_skylib", version = "1.9.0")
 
 # Go toolchain for the cel2lean translator (CEL → Lean propositions). Go is a
@@ -69,7 +76,12 @@ go_sdk.download(version = "1.25.5")
 
 go_deps = use_extension("@gazelle//:extensions.bzl", "go_deps")
 go_deps.from_file(go_mod = "//:go.mod")
-use_repo(go_deps, "build_buf_gen_go_bufbuild_protovalidate_protocolbuffers_go", "com_github_google_cel_go", "org_golang_google_protobuf")
+use_repo(
+    go_deps,
+    "build_buf_gen_go_bufbuild_protovalidate_protocolbuffers_go",
+    "com_github_google_cel_go",
+    "org_golang_google_protobuf",
+)
 
 # Lean toolchain for protovalidate_lean's OWN builds/tests only (dev_dependency,
 # so it is not forced on consumers). Reuses the pinned nixpkgs + lean overlay

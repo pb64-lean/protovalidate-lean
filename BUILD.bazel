@@ -10,6 +10,15 @@ load("@gazelle//:def.bzl", "gazelle")
 
 package(default_visibility = ["//visibility:public"])
 
+exports_files(["MODULE.bazel"])
+
 # gazelle:prefix github.com/petersonbill64/protovalidate-lean
 # gazelle:proto disable_global
 gazelle(name = "gazelle")
+
+# The official v1.2.2 runner is fetched through the pinned Go module rather
+# than from PATH, so the conformance gate is reproducible in CI.
+alias(
+    name = "official_conformance_harness",
+    actual = "@protovalidate//tools/protovalidate-conformance",
+)

@@ -522,12 +522,16 @@ func TestRegexGate(t *testing.T) {
 		!strings.Contains(err.Error(), "outside the supported RE2 subset") {
 		t.Errorf("unsupported pattern: err = %v, want subset error", err)
 	}
-	res, err := Translate(`this.matches(this)`, Options{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(res.Warnings) != 1 || !strings.Contains(res.Warnings[0], "non-literal regex") {
-		t.Errorf("non-literal pattern warnings = %v, want non-literal warning", res.Warnings)
+	for _, expr := range []string{
+		`this.matches(this)`,
+		`matches(this, this)`,
+		`!this.matches(this)`,
+		`[this].exists(s, s.matches(this))`,
+	} {
+		if _, err := Translate(expr, Options{}); err == nil ||
+			!strings.Contains(err.Error(), "requires a string-literal pattern") {
+			t.Errorf("dynamic pattern %q: err = %v, want literal-pattern error", expr, err)
+		}
 	}
 }
 

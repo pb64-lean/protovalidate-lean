@@ -31,6 +31,31 @@ lean_protovalidate_library(
 # are audited at their source too.
 lean_assurance_test(
     name = "money_valid_assurance",
+    allowed_axioms = [
+        "propext",
+        "Classical.choice",
+        "Quot.sound",
+    ],
+    expected_extern_declarations = {},
+    expected_implemented_by = {},
+    expected_native_targets = [
+        "@rules_lean_grpc+//Zlib:lean_runtime_headers",
+        "@rules_lean_grpc+//Zlib:zlib_shim",
+        "@tls13-lean++_repo_rules+hacl//:hacl",
+        "@tls13-lean+//HaclStar:hacl_shim",
+        "@tls13-lean+//HaclStar:lean_runtime_headers",
+        "@zlib+//:z",
+    ],
+    expected_opaque_constants = [],
+    expected_partial_definitions = [],
+    expected_unsafe_constants = [],
+    module_prefixes = ["MoneyValid.money"],
+    policy_mode = "exact",
+    principal_theorem_types = {
+        "common.v1.Valid.Money.decodeValid_sound": "∀ {bytes : ByteArray} {v : common.v1.Valid.Money}, common.v1.Valid.Money.decodeValid bytes = Except.ok v → ∃ base, common.v1.Money.decode bytes = Except.ok base ∧ common.v1.Valid.Money.validate base = Except.ok v",
+        "common.v1.Valid.Money.validate_complete": "∀ {base : common.v1.Money}, common.v1.Valid.Money.ValidPred base → (common.v1.Valid.Money.validate base).isOk",
+        "common.v1.Valid.Money.validate_sound": "∀ {base : common.v1.Money} {v : common.v1.Valid.Money}, common.v1.Valid.Money.validate base = Except.ok v → common.v1.Valid.Money.ValidPred base",
+    },
     principal_theorems = [
         "common.v1.Valid.Money.validate_sound",
         "common.v1.Valid.Money.validate_complete",

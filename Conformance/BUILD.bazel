@@ -1,0 +1,71 @@
+"""Official protovalidate conformance integration."""
+
+load("@rules_lean//lean:defs.bzl", "lean_binary")
+load("@rules_lean_grpc//:defs.bzl", "lean_proto_library")
+load("//protovalidate:defs.bzl", "lean_protovalidate_library")
+
+package(default_visibility = ["//visibility:public"])
+
+# Keep this source list deliberately explicit. It is the statically supported
+# proto3 slice of the v1.2.2 official corpus; the freshness test below rejects
+# silent drift in either this registry or the upstream version.
+lean_proto_library(
+    name = "supported_cases_lean",
+    proto = "@protovalidate//proto/protovalidate-testing/buf/validate/conformance/cases:lean_supported_cases_proto",
+)
+
+lean_protovalidate_library(
+    name = "supported_cases_valid",
+    lean_proto = ":supported_cases_lean",
+    proto = "@protovalidate//proto/protovalidate-testing/buf/validate/conformance/cases:lean_supported_cases_proto",
+)
+
+lean_binary(
+    name = "executor",
+    srcs = ["Executor.lean"],
+    deps = [
+        ":supported_cases_valid",
+        "@grpc_lean_protobuf//:protobuf",
+    ],
+)
+
+# This is intentionally named a supported-slice gate.  It runs the official
+# v1.2.2 harness and all six cases in standard_rules/bool, with the strict error
+# and message flags enabled, but makes no whole-corpus conformance claim.  These
+# particular upstream vectors contain neither expected message text nor error
+# cases; they do exactly compare violation structure, paths, and rule ids.
+sh_test(
+    name = "supported_slice_test",
+    srcs = ["supported_slice_test.sh"],
+    args = [
+        "$(location //:official_conformance_harness)",
+        "$(location :executor)",
+        "$(location expected_failures.yaml)",
+    ],
+    data = [
+        "expected_failures.yaml",
+        ":executor",
+        "//:official_conformance_harness",
+    ],
+)
+
+# The registry classifies every source in the pinned upstream case corpus and
+# independently lists the two sources which compile in this initial slice.
+# Any upstream addition, removal, or silent narrowing of the compiled target
+# fails this test.
+sh_test(
+    name = "registry_freshness_test",
+    srcs = ["registry_freshness_test.sh"],
+    args = [
+        "$(location //:MODULE.bazel)",
+        "$(location //third_party:protovalidate_tools_build.patch)",
+        "$(location corpus_registry.tsv)",
+        "$(locations @protovalidate//proto/protovalidate-testing/buf/validate/conformance/cases:lean_all_case_sources)",
+    ],
+    data = [
+        "corpus_registry.tsv",
+        "//:MODULE.bazel",
+        "//third_party:protovalidate_tools_build.patch",
+        "@protovalidate//proto/protovalidate-testing/buf/validate/conformance/cases:lean_all_case_sources",
+    ],
+)

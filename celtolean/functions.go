@@ -149,8 +149,13 @@ func (t *translator) function(c ast.CallExpr) (piece, error) {
 			}
 			t.regexes[lit] = true
 		} else {
-			t.warn("non-literal regex pattern: a pattern outside the supported subset matches nothing at runtime " +
-				"(unsound under negation); prefer literal patterns, which are checked at generation time")
+			// The Lean runtime intentionally treats an unsupported pattern as no
+			// match.  That is a safe implementation detail only after codegen has
+			// proved that the pattern is in the supported subset.  A dynamic
+			// pattern cannot be proved here and, under negation, the fallback would
+			// turn a CEL evaluation error into acceptance.  Reject every dynamic
+			// operand instead of emitting a proposition with weaker semantics.
+			return piece{}, fmt.Errorf("matches() requires a string-literal pattern; dynamic regex patterns cannot be translated soundly")
 		}
 		return celApp("regexMatch", kBool, rest[0]), nil
 

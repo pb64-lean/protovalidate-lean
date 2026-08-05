@@ -68,65 +68,201 @@ inductive Esc where
   | char (c : Char)
   | pred (p : Char → Bool)
 
-def escape : List Char → Except String (Esc × List Char)
+/- A successful parser result carries the fact that its unconsumed input is a
+suffix of the input it was given.  `Progress` additionally records strict
+consumption.  These witnesses are erased at runtime, but make every recursive
+call below visibly well-founded without an arbitrary fuel limit. -/
+private structure Parsed (α : Type) (input : List Char) where
+  value : α
+  rest : List Char
+  suffix : rest <:+ input
+
+private structure Progress (α : Type) (input : List Char) extends Parsed α input where
+  shorter : rest.length < input.length
+
+private def suffixRefl (xs : List Char) : xs <:+ xs := ⟨[], rfl⟩
+private def suffixTail (x : Char) (xs : List Char) : xs <:+ x :: xs := ⟨[x], rfl⟩
+
+private def Parsed.toPair (p : Parsed α input) : α × List Char := (p.value, p.rest)
+
+private def Parsed.weaken (p : Parsed α middle) (h : middle <:+ input) : Parsed α input :=
+  { value := p.value, rest := p.rest, suffix := p.suffix.trans h }
+
+private def Progress.thenParsed (p : Progress α input) (q : Parsed β p.rest) :
+    Progress β input :=
+  { value := q.value
+    rest := q.rest
+    suffix := q.suffix.trans p.suffix
+    shorter := Nat.lt_of_le_of_lt q.suffix.length_le p.shorter }
+
+private def dropNonGreedy : (cs : List Char) → Parsed Unit cs
+  | '?' :: rest => { value := (), rest, suffix := suffixTail '?' rest }
+  | rest => { value := (), rest, suffix := suffixRefl rest }
+
+private def stripClassNegation : (cs : List Char) → Parsed Bool cs
+  | '^' :: rest => { value := true, rest, suffix := suffixTail '^' rest }
+  | rest => { value := false, rest, suffix := suffixRefl rest }
+
+private def escapeCore : (cs : List Char) → Except String (Parsed Esc cs)
   | [] => .error "trailing backslash"
-  | c :: rest =>
-    match c with
-    | 'd' => .ok (.pred digitP, rest)
-    | 'D' => .ok (.pred (!digitP ·), rest)
-    | 'w' => .ok (.pred wordP, rest)
-    | 'W' => .ok (.pred (!wordP ·), rest)
-    | 's' => .ok (.pred spaceP, rest)
-    | 'S' => .ok (.pred (!spaceP ·), rest)
-    | 'n' => .ok (.char '\n', rest)
-    | 't' => .ok (.char '\t', rest)
-    | 'r' => .ok (.char '\r', rest)
-    | 'f' => .ok (.char '\x0c', rest)
-    | 'v' => .ok (.char '\x0b', rest)
-    | 'a' => .ok (.char '\x07', rest)
-    | '0' => .ok (.char '\x00', rest)
-    | 'x' =>
+  | 'd' :: rest => .ok { value := .pred digitP, rest, suffix := suffixTail 'd' rest }
+  | 'D' :: rest => .ok { value := .pred (!digitP ·), rest, suffix := suffixTail 'D' rest }
+  | 'w' :: rest => .ok { value := .pred wordP, rest, suffix := suffixTail 'w' rest }
+  | 'W' :: rest => .ok { value := .pred (!wordP ·), rest, suffix := suffixTail 'W' rest }
+  | 's' :: rest => .ok { value := .pred spaceP, rest, suffix := suffixTail 's' rest }
+  | 'S' :: rest => .ok { value := .pred (!spaceP ·), rest, suffix := suffixTail 'S' rest }
+  | 'n' :: rest => .ok { value := .char '\n', rest, suffix := suffixTail 'n' rest }
+  | 't' :: rest => .ok { value := .char '\t', rest, suffix := suffixTail 't' rest }
+  | 'r' :: rest => .ok { value := .char '\r', rest, suffix := suffixTail 'r' rest }
+  | 'f' :: rest => .ok { value := .char '\x0c', rest, suffix := suffixTail 'f' rest }
+  | 'v' :: rest => .ok { value := .char '\x0b', rest, suffix := suffixTail 'v' rest }
+  | 'a' :: rest => .ok { value := .char '\x07', rest, suffix := suffixTail 'a' rest }
+  | '0' :: rest => .ok { value := .char '\x00', rest, suffix := suffixTail '0' rest }
+  | 'x' :: rest =>
       match rest with
       | '{' :: more =>
         let ds := more.takeWhile (· != '}')
-        match more.drop ds.length with
+        match hdrop : more.drop ds.length with
         | '}' :: after =>
           match hexChar? ds with
-          | some ch => .ok (.char ch, after)
+          | some ch =>
+            have h₁ : after <:+ more.drop ds.length := by
+              rw [hdrop]
+              exact suffixTail '}' after
+            have h₂ : more.drop ds.length <:+ more := List.drop_suffix _ _
+            .ok {
+              value := .char ch
+              rest := after
+              suffix := h₁.trans (h₂.trans ((suffixTail '{' more).trans
+                (suffixTail 'x' ('{' :: more))))
+            }
           | none => .error "invalid \\x{...} escape"
         | _ => .error "unterminated \\x{...} escape"
       | h1 :: h2 :: after =>
         match hexChar? [h1, h2] with
-        | some ch => .ok (.char ch, after)
+        | some ch => .ok {
+            value := .char ch
+            rest := after
+            suffix := (suffixTail h2 after).trans
+              ((suffixTail h1 (h2 :: after)).trans (suffixTail 'x' (h1 :: h2 :: after)))
+          }
         | none => .error "invalid \\xHH escape"
       | _ => .error "truncated \\x escape"
-    | _ =>
+  | c :: rest =>
       if c.isAlphanum then .error s!"unsupported escape \\{c}"
-      else .ok (.char c, rest)
+      else .ok { value := .char c, rest, suffix := suffixTail c rest }
 
-mutual
+def escape (cs : List Char) : Except String (Esc × List Char) :=
+  (escapeCore cs).map Parsed.toPair
 
 /-- Items of a character class; `first` admits `]` as a literal. -/
-partial def classItems (cs : List Char) (first : Bool) (acc : List (Char → Bool)) :
-    Except String (List (Char → Bool) × List Char) := do
-  match cs with
-  | [] => .error "unterminated character class"
-  | ']' :: rest =>
-    if first then classItems rest false ((· == ']') :: acc)
-    else .ok (acc, rest)
-  | '\\' :: esc =>
-    match ← escape esc with
-    | (.pred p, r) => classItems r false (p :: acc)
-    | (.char lo, r) => classRange lo r acc
-  | c :: rest => classRange c rest acc
+private def classItemsCore : (cs : List Char) → (first : Bool) →
+    (acc : List (Char → Bool)) → Except String (Parsed (List (Char → Bool)) cs)
+  | [], _, _ => .error "unterminated character class"
+  | ']' :: rest, first, acc => do
+    if first then
+      have hlt : rest.length < (']' :: rest).length := by simp
+      let p ← classItemsCore rest false ((· == ']') :: acc)
+      pure (p.weaken (suffixTail ']' rest))
+    else
+      .ok { value := acc, rest, suffix := suffixTail ']' rest }
+  | '\\' :: esc, _, acc => do
+    let e ← escapeCore esc
+    match e.value with
+    | .pred p =>
+      have hlt : e.rest.length < ('\\' :: esc).length :=
+        Nat.lt_of_le_of_lt e.suffix.length_le (by simp)
+      let q ← classItemsCore e.rest false (p :: acc)
+      pure (q.weaken (e.suffix.trans (suffixTail '\\' esc)))
+    | .char lo =>
+      match hrest : e.rest with
+      | '-' :: ']' :: rest =>
+        have hlt : (']' :: rest).length < ('\\' :: esc).length := by
+          have he := e.suffix.length_le
+          simp only [List.length_cons] at he ⊢
+          simp only [hrest, List.length_cons] at he
+          omega
+        let q ← classItemsCore (']' :: rest) false ((· == '-') :: (· == lo) :: acc)
+        have hs : ']' :: rest <:+ e.rest := by rw [hrest]; exact suffixTail '-' (']' :: rest)
+        pure (q.weaken (hs.trans (e.suffix.trans (suffixTail '\\' esc))))
+      | '-' :: '\\' :: esc2 =>
+        let hi ← escapeCore esc2
+        match hi.value with
+        | .char ch =>
+          have hs : esc2 <:+ e.rest := by
+            rw [hrest]
+            exact (suffixTail '\\' esc2).trans (suffixTail '-' ('\\' :: esc2))
+          have hlt : hi.rest.length < ('\\' :: esc).length := by
+            have he := e.suffix.length_le
+            have hh := hi.suffix.length_le
+            have hslen := hs.length_le
+            simp only [List.length_cons] at he hslen ⊢
+            omega
+          let q ← classItemsCore hi.rest false
+            ((fun c => charLE lo c && charLE c ch) :: acc)
+          pure (q.weaken (hi.suffix.trans (hs.trans (e.suffix.trans (suffixTail '\\' esc)))))
+        | .pred _ => .error "invalid range endpoint"
+      | '-' :: hi :: rest =>
+        have hlt : rest.length < ('\\' :: esc).length := by
+          have he := e.suffix.length_le
+          simp only [hrest, List.length_cons] at he
+          simp only [List.length_cons]
+          omega
+        let q ← classItemsCore rest false ((fun c => charLE lo c && charLE c hi) :: acc)
+        have hs : rest <:+ e.rest := by
+          rw [hrest]
+          exact (suffixTail hi rest).trans (suffixTail '-' (hi :: rest))
+        pure (q.weaken (hs.trans (e.suffix.trans (suffixTail '\\' esc))))
+      | _ =>
+        have hlt : e.rest.length < ('\\' :: esc).length :=
+          Nat.lt_of_le_of_lt e.suffix.length_le (by simp)
+        let q ← classItemsCore e.rest false ((· == lo) :: acc)
+        pure (q.weaken (e.suffix.trans (suffixTail '\\' esc)))
+  | lo :: rest, _, acc => do
+    match rest with
+    | '-' :: ']' :: tail =>
+      have hlt : (']' :: tail).length < (lo :: '-' :: ']' :: tail).length := by simp
+      let q ← classItemsCore (']' :: tail) false ((· == '-') :: (· == lo) :: acc)
+      pure (q.weaken ((suffixTail '-' (']' :: tail)).trans
+        (suffixTail lo ('-' :: ']' :: tail))))
+    | '-' :: '\\' :: esc =>
+      let hi ← escapeCore esc
+      match hi.value with
+      | .char ch =>
+        have hlt : hi.rest.length < (lo :: '-' :: '\\' :: esc).length := by
+          have hh := hi.suffix.length_le
+          simp only [List.length_cons] at hh ⊢
+          omega
+        let q ← classItemsCore hi.rest false
+          ((fun c => charLE lo c && charLE c ch) :: acc)
+        pure (q.weaken (hi.suffix.trans
+          ((suffixTail '\\' esc).trans ((suffixTail '-' ('\\' :: esc)).trans
+            (suffixTail lo ('-' :: '\\' :: esc))))))
+      | .pred _ => .error "invalid range endpoint"
+    | '-' :: hi :: tail =>
+      have hlt : tail.length < (lo :: '-' :: hi :: tail).length := by
+        simp only [List.length_cons]
+        omega
+      let q ← classItemsCore tail false ((fun c => charLE lo c && charLE c hi) :: acc)
+      pure (q.weaken ((suffixTail hi tail).trans
+        ((suffixTail '-' (hi :: tail)).trans (suffixTail lo ('-' :: hi :: tail)))))
+    | other =>
+      have hlt : other.length < (lo :: other).length := by simp
+      let q ← classItemsCore other false ((· == lo) :: acc)
+      pure (q.weaken (suffixTail lo other))
+  termination_by cs _ _ => cs.length
+  decreasing_by all_goals assumption
+
+def classItems (cs : List Char) (first : Bool) (acc : List (Char → Bool)) :
+    Except String (List (Char → Bool) × List Char) :=
+  (classItemsCore cs first acc).map Parsed.toPair
 
 /-- After a literal class element: either the low end of a range or a lone
 character. -/
-partial def classRange (lo : Char) (cs : List Char) (acc : List (Char → Bool)) :
+def classRange (lo : Char) (cs : List Char) (acc : List (Char → Bool)) :
     Except String (List (Char → Bool) × List Char) := do
   match cs with
   | '-' :: ']' :: rest =>
-    -- Trailing '-' is a literal.
     classItems (']' :: rest) false ((· == '-') :: (· == lo) :: acc)
   | '-' :: '\\' :: esc =>
     match ← escape esc with
@@ -135,17 +271,21 @@ partial def classRange (lo : Char) (cs : List Char) (acc : List (Char → Bool))
   | '-' :: hi :: rest => classItems rest false ((fun ch => charLE lo ch && charLE ch hi) :: acc)
   | _ => classItems cs false ((· == lo) :: acc)
 
-end
-
 /-- Parse the interior of a character class (after `[`), producing its
 predicate. -/
-partial def parseClass (cs : List Char) : Except String ((Char → Bool) × List Char) := do
-  let (neg, cs) := match cs with
-    | '^' :: rest => (true, rest)
-    | _ => (false, cs)
-  let (preds, rest) ← classItems cs true []
-  let base := fun ch => preds.any (· ch)
-  .ok ((if neg then (fun ch => !base ch) else base), rest)
+private def parseClassCore (cs : List Char) :
+    Except String (Parsed (Char → Bool) cs) := do
+  let head := stripClassNegation cs
+  let items ← classItemsCore head.rest true []
+  let base := fun ch => items.value.any (· ch)
+  .ok {
+    value := if head.value then (fun ch => !base ch) else base
+    rest := items.rest
+    suffix := items.suffix.trans head.suffix
+  }
+
+def parseClass (cs : List Char) : Except String ((Char → Bool) × List Char) :=
+  (parseClassCore cs).map Parsed.toPair
 
 def repeatN (a : Ast) : Nat → Ast
   | 0 => .epsilon
@@ -159,87 +299,202 @@ def optChain (a : Ast) : Nat → Ast
 def natOf (ds : List Char) : Nat :=
   ds.foldl (fun acc c => acc * 10 + (c.toNat - 48)) 0
 
-mutual
-
-partial def parseAlt (cs : List Char) : Except String (Ast × List Char) := do
-  let (a, cs) ← parseConcat cs
-  match cs with
-  | '|' :: rest =>
-    let (b, rest) ← parseAlt rest
-    .ok (.alt a b, rest)
-  | _ => .ok (a, cs)
-
-partial def parseConcat (cs : List Char) : Except String (Ast × List Char) := do
-  match cs with
-  | [] | '|' :: _ | ')' :: _ => .ok (.epsilon, cs)
-  | _ =>
-    let (a, cs) ← parseRepeat cs
-    let (b, cs) ← parseConcat cs
-    match b with
-    | .epsilon => .ok (a, cs)
-    | _ => .ok (.concat a b, cs)
-
-partial def parseRepeat (cs : List Char) : Except String (Ast × List Char) := do
-  let (a, cs) ← parseAtom cs
-  quantify a cs
-
-partial def quantify (a : Ast) (cs : List Char) : Except String (Ast × List Char) := do
-  let nonGreedy : List Char → List Char
-    | '?' :: rest => rest
-    | rest => rest
-  match cs with
-  | '*' :: rest => quantify (.star a) (nonGreedy rest)
-  | '+' :: rest => quantify (.concat a (.star a)) (nonGreedy rest)
-  | '?' :: rest => quantify (.alt a .epsilon) (nonGreedy rest)
-  | '{' :: rest =>
+private def quantifyCore (a : Ast) : (cs : List Char) → Except String (Parsed Ast cs)
+  | '*' :: rest => do
+    let ng := dropNonGreedy rest
+    have hlt : ng.rest.length < ('*' :: rest).length :=
+      Nat.lt_of_le_of_lt ng.suffix.length_le (by simp)
+    let q ← quantifyCore (.star a) ng.rest
+    pure (q.weaken (ng.suffix.trans (suffixTail '*' rest)))
+  | '+' :: rest => do
+    let ng := dropNonGreedy rest
+    have hlt : ng.rest.length < ('+' :: rest).length :=
+      Nat.lt_of_le_of_lt ng.suffix.length_le (by simp)
+    let q ← quantifyCore (.concat a (.star a)) ng.rest
+    pure (q.weaken (ng.suffix.trans (suffixTail '+' rest)))
+  | '?' :: rest => do
+    let ng := dropNonGreedy rest
+    have hlt : ng.rest.length < ('?' :: rest).length :=
+      Nat.lt_of_le_of_lt ng.suffix.length_le (by simp)
+    let q ← quantifyCore (.alt a .epsilon) ng.rest
+    pure (q.weaken (ng.suffix.trans (suffixTail '?' rest)))
+  | '{' :: rest => do
     let lo := rest.takeWhile Char.isDigit
-    if lo.isEmpty then .ok (a, cs)  -- RE2: `{` without bounds is a literal, handled by parseAtom next round
+    if lo.isEmpty then
+      .ok { value := a, rest := '{' :: rest, suffix := suffixRefl ('{' :: rest) }
     else
       let n := natOf lo
-      match rest.drop lo.length with
+      match hdrop : rest.drop lo.length with
       | '}' :: r2 =>
         if n > 512 then .error "repetition bound too large" else
-        quantify (repeatN a n) (nonGreedy r2)
+        let ng := dropNonGreedy r2
+        have hs : r2 <:+ rest := by
+          have hd : rest.drop lo.length <:+ rest := List.drop_suffix _ _
+          have ht : r2 <:+ rest.drop lo.length := by rw [hdrop]; exact suffixTail '}' r2
+          exact ht.trans hd
+        have hlt : ng.rest.length < ('{' :: rest).length :=
+          Nat.lt_of_le_of_lt (ng.suffix.trans hs).length_le (by simp)
+        let q ← quantifyCore (repeatN a n) ng.rest
+        pure (q.weaken (ng.suffix.trans (hs.trans (suffixTail '{' rest))))
       | ',' :: '}' :: r2 =>
         if n > 512 then .error "repetition bound too large" else
-        quantify (.concat (repeatN a n) (.star a)) (nonGreedy r2)
+        let ng := dropNonGreedy r2
+        have hs : r2 <:+ rest := by
+          have hd : rest.drop lo.length <:+ rest := List.drop_suffix _ _
+          have ht : r2 <:+ rest.drop lo.length := by
+            rw [hdrop]
+            exact (suffixTail '}' r2).trans (suffixTail ',' ('}' :: r2))
+          exact ht.trans hd
+        have hlt : ng.rest.length < ('{' :: rest).length :=
+          Nat.lt_of_le_of_lt (ng.suffix.trans hs).length_le (by simp)
+        let q ← quantifyCore (.concat (repeatN a n) (.star a)) ng.rest
+        pure (q.weaken (ng.suffix.trans (hs.trans (suffixTail '{' rest))))
       | ',' :: r2 =>
         let hi := r2.takeWhile Char.isDigit
-        match r2.drop hi.length with
+        match hhi : r2.drop hi.length with
         | '}' :: r3 =>
           let m := natOf hi
           if m > 512 || m < n then .error "invalid repetition bounds" else
-          quantify (.concat (repeatN a n) (optChain a (m - n))) (nonGreedy r3)
+          let ng := dropNonGreedy r3
+          have hs : r3 <:+ rest := by
+            have hd₁ : rest.drop lo.length <:+ rest := List.drop_suffix _ _
+            have hr2 : r2 <:+ rest.drop lo.length := by rw [hdrop]; exact suffixTail ',' r2
+            have hd₂ : r2.drop hi.length <:+ r2 := List.drop_suffix _ _
+            have hr3 : r3 <:+ r2.drop hi.length := by rw [hhi]; exact suffixTail '}' r3
+            exact hr3.trans (hd₂.trans (hr2.trans hd₁))
+          have hlt : ng.rest.length < ('{' :: rest).length :=
+            Nat.lt_of_le_of_lt (ng.suffix.trans hs).length_le (by simp)
+          let q ← quantifyCore (.concat (repeatN a n) (optChain a (m - n))) ng.rest
+          pure (q.weaken (ng.suffix.trans (hs.trans (suffixTail '{' rest))))
         | _ => .error "unterminated repetition"
       | _ => .error "unterminated repetition"
-  | _ => .ok (a, cs)
+  | cs => .ok { value := a, rest := cs, suffix := suffixRefl cs }
+  termination_by cs => cs.length
+  decreasing_by all_goals assumption
 
-partial def parseAtom (cs : List Char) : Except String (Ast × List Char) := do
-  match cs with
+def quantify (a : Ast) (cs : List Char) : Except String (Ast × List Char) :=
+  (quantifyCore a cs).map Parsed.toPair
+
+mutual
+
+private def parseAltCore (cs : List Char) : Except String (Parsed Ast cs) := do
+  let p ← parseConcatCore cs
+  match hrest : p.rest with
+  | '|' :: rest =>
+    have hlt : 4 * rest.length + 3 < 4 * cs.length + 3 := by
+      have hp := p.suffix.length_le
+      simp only [hrest, List.length_cons] at hp
+      omega
+    let q ← parseAltCore rest
+    have hs : rest <:+ p.rest := by rw [hrest]; exact suffixTail '|' rest
+    .ok {
+      value := .alt p.value q.value
+      rest := q.rest
+      suffix := q.suffix.trans (hs.trans p.suffix)
+    }
+  | _ => .ok p
+  termination_by 4 * cs.length + 3
+  decreasing_by all_goals first | assumption | omega
+
+private def parseConcatCore : (cs : List Char) → Except String (Parsed Ast cs)
+  | [] => .ok { value := .epsilon, rest := [], suffix := suffixRefl [] }
+  | '|' :: rest => .ok {
+      value := .epsilon, rest := '|' :: rest, suffix := suffixRefl ('|' :: rest) }
+  | ')' :: rest => .ok {
+      value := .epsilon, rest := ')' :: rest, suffix := suffixRefl (')' :: rest) }
+  | cs => do
+    let p ← parseRepeatCore cs
+    have hlt : 4 * p.rest.length + 2 < 4 * cs.length + 2 := by
+      have hp := p.shorter
+      omega
+    let q ← parseConcatCore p.rest
+    .ok {
+      value := match q.value with | .epsilon => p.value | _ => .concat p.value q.value
+      rest := q.rest
+      suffix := q.suffix.trans p.suffix
+    }
+  termination_by cs => 4 * cs.length + 2
+  decreasing_by all_goals first | assumption | omega
+
+private def parseRepeatCore (cs : List Char) : Except String (Progress Ast cs) := do
+  let p ← parseAtomCore cs
+  let q ← quantifyCore p.value p.rest
+  pure (p.thenParsed q)
+  termination_by 4 * cs.length + 1
+  decreasing_by all_goals omega
+
+private def parseAtomCore : (cs : List Char) → Except String (Progress Ast cs)
   | [] => .error "expected atom"
-  | '(' :: rest =>
-    let rest ← match rest with
-      | '?' :: ':' :: r => pure r
+  | '(' :: rest => do
+    let group ← (match rest with
+      | '?' :: ':' :: r => pure {
+          value := (), rest := r,
+          suffix := (suffixTail ':' r).trans (suffixTail '?' (':' :: r))
+        }
       | '?' :: _ => .error "unsupported (?...) group"
-      | r => pure r
-    let (a, rest) ← parseAlt rest
-    match rest with
-    | ')' :: r2 => .ok (a, r2)
+      | r => pure { value := (), rest := r, suffix := suffixRefl r } :
+        Except String (Parsed Unit rest))
+    have hlt : 4 * group.rest.length + 3 < 4 * ('(' :: rest).length := by
+      have hg := group.suffix.length_le
+      simp only [List.length_cons]
+      omega
+    let p ← parseAltCore group.rest
+    match hclose : p.rest with
+    | ')' :: r2 =>
+      have hs : r2 <:+ p.rest := by rw [hclose]; exact suffixTail ')' r2
+      have hall : r2 <:+ '(' :: rest :=
+        hs.trans (p.suffix.trans (group.suffix.trans (suffixTail '(' rest)))
+      .ok {
+        value := p.value
+        rest := r2
+        suffix := hall
+        shorter := by
+          have := (hs.trans (p.suffix.trans group.suffix)).length_le
+          simp only [List.length_cons]
+          omega
+      }
     | _ => .error "unterminated group"
-  | '[' :: rest =>
-    let (p, rest) ← parseClass rest
-    .ok (.char p, rest)
-  | '\\' :: rest =>
-    match ← escape rest with
-    | (.char ch, r) => .ok (.char (· == ch), r)
-    | (.pred p, r) => .ok (.char p, r)
-  | '.' :: rest => .ok (.char (· != '\n'), rest)
-  | '^' :: rest => .ok (.assertStart, rest)
-  | '$' :: rest => .ok (.assertEnd, rest)
+  | '[' :: rest => do
+    let p ← parseClassCore rest
+    .ok {
+      value := .char p.value
+      rest := p.rest
+      suffix := p.suffix.trans (suffixTail '[' rest)
+      shorter := Nat.lt_of_le_of_lt p.suffix.length_le (by simp)
+    }
+  | '\\' :: rest => do
+    let p ← escapeCore rest
+    .ok {
+      value := match p.value with | .char ch => .char (· == ch) | .pred pred => .char pred
+      rest := p.rest
+      suffix := p.suffix.trans (suffixTail '\\' rest)
+      shorter := Nat.lt_of_le_of_lt p.suffix.length_le (by simp)
+    }
+  | '.' :: rest => .ok {
+      value := .char (· != '\n'), rest, suffix := suffixTail '.' rest, shorter := by simp }
+  | '^' :: rest => .ok {
+      value := .assertStart, rest, suffix := suffixTail '^' rest, shorter := by simp }
+  | '$' :: rest => .ok {
+      value := .assertEnd, rest, suffix := suffixTail '$' rest, shorter := by simp }
   | '*' :: _ | '+' :: _ | '?' :: _ => .error "quantifier without operand"
-  | c :: rest => .ok (.char (· == c), rest)
+  | c :: rest => .ok {
+      value := .char (· == c), rest, suffix := suffixTail c rest, shorter := by simp }
+  termination_by cs => 4 * cs.length
+  decreasing_by all_goals first | assumption | omega
 
 end
+
+def parseAlt (cs : List Char) : Except String (Ast × List Char) :=
+  (parseAltCore cs).map Parsed.toPair
+
+def parseConcat (cs : List Char) : Except String (Ast × List Char) :=
+  (parseConcatCore cs).map Parsed.toPair
+
+def parseRepeat (cs : List Char) : Except String (Ast × List Char) :=
+  (parseRepeatCore cs).map fun p => (p.value, p.rest)
+
+def parseAtom (cs : List Char) : Except String (Ast × List Char) :=
+  (parseAtomCore cs).map fun p => (p.value, p.rest)
 
 def parse (pattern : String) : Except String Ast := do
   let (a, rest) ← parseAlt pattern.toList
@@ -348,12 +603,26 @@ def Cel.Regex.accepts (pattern : String) : Bool :=
 #guard !Cel.Regex.accepts "a{1000}"
 #guard !Cel.Regex.accepts "[a-"
 
-/-- CEL `matches` (RE2 `PartialMatch`): unanchored regular-expression search.
+/-- Checked CEL `matches` (RE2 `PartialMatch`): an unanchored search that keeps
+an unsupported pattern distinct from a valid pattern with no match. -/
+def Cel.regexMatchChecked (s : String) (re : String) : Except String Bool := do
+  let (prog, entry) ← Cel.Regex.compile re
+  pure (Cel.Regex.search prog entry s)
+
+/-- Boolean CEL `matches` used by generated validation predicates.
 Patterns that fail to parse (or use unsupported constructs) match nothing;
 literal patterns are rejected at codegen time (Go subset check) and guarded at
-Lean compile time (`Cel.Regex.accepts`), so only *dynamic* patterns can reach
-the match-nothing fallback. -/
+Lean compile time (`Cel.Regex.accepts`), while generated dynamic patterns are
+rejected outright. Direct callers with an untrusted pattern should use
+`Cel.regexMatchChecked` so a parse error cannot be mistaken for `false`. -/
 def Cel.regexMatch (s : String) (re : String) : Bool :=
-  match Cel.Regex.compile re with
-  | .ok (prog, entry) => Cel.Regex.search prog entry s
+  match Cel.regexMatchChecked s re with
+  | .ok matched => matched
   | .error _ => false
+
+#guard match Cel.regexMatchChecked "admin" "^admin$" with
+  | .ok true => true
+  | _ => false
+#guard match Cel.regexMatchChecked "admin" "(?i)admin" with
+  | .error _ => true
+  | .ok _ => false

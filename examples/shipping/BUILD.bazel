@@ -11,6 +11,26 @@ load("@rules_lean//lean:defs.bzl", "lean_assurance_test", "lean_test")
 load("@rules_lean_grpc//:defs.bzl", "lean_proto_library")
 load("//protovalidate:defs.bzl", "lean_protovalidate_library")
 
+_ASSURANCE_ALLOWED_AXIOMS = [
+    "propext",
+    "Classical.choice",
+    "Quot.sound",
+]
+
+_ASSURANCE_MODULE_PREFIXES = [
+    "ShippingValid.inventory",
+    "ShippingValid.shipping",
+]
+
+_ASSURANCE_NATIVE_TARGETS = [
+    "@rules_lean_grpc+//Zlib:lean_runtime_headers",
+    "@rules_lean_grpc+//Zlib:zlib_shim",
+    "@tls13-lean++_repo_rules+hacl//:hacl",
+    "@tls13-lean+//HaclStar:hacl_shim",
+    "@tls13-lean+//HaclStar:lean_runtime_headers",
+    "@zlib+//:z",
+]
+
 proto_library(
     name = "shipping_proto",
     srcs = [
@@ -45,6 +65,25 @@ lean_protovalidate_library(
 # //lean:runtime_assurance (the generic Decision lemmas).
 lean_assurance_test(
     name = "shipping_valid_assurance",
+    allowed_axioms = _ASSURANCE_ALLOWED_AXIOMS,
+    expected_extern_declarations = {},
+    expected_implemented_by = {},
+    expected_native_targets = _ASSURANCE_NATIVE_TARGETS,
+    expected_opaque_constants = [],
+    expected_partial_definitions = [],
+    expected_unsafe_constants = [],
+    module_prefixes = _ASSURANCE_MODULE_PREFIXES,
+    policy_mode = "exact",
+    principal_theorem_types = {
+        "shipping.v1.Valid.Item.decodeValid_sound": "∀ {bytes : ByteArray} {v : shipping.v1.Valid.Item}, shipping.v1.Valid.Item.decodeValid bytes = Except.ok v → ∃ base, shipping.v1.Item.decode bytes = Except.ok base ∧ shipping.v1.Valid.Item.validate base = Except.ok v",
+        "shipping.v1.Valid.Item.validate_complete": "∀ {base : shipping.v1.Item}, shipping.v1.Valid.Item.ValidPred base → (shipping.v1.Valid.Item.validate base).isOk",
+        "shipping.v1.Valid.Item.validate_sound": "∀ {base : shipping.v1.Item} {v : shipping.v1.Valid.Item}, shipping.v1.Valid.Item.validate base = Except.ok v → shipping.v1.Valid.Item.ValidPred base",
+        "shipping.v1.Valid.Order.decodeValid_sound": "∀ {bytes : ByteArray} {v : shipping.v1.Valid.Order}, shipping.v1.Valid.Order.decodeValid bytes = Except.ok v → ∃ base, shipping.v1.Order.decode bytes = Except.ok base ∧ shipping.v1.Valid.Order.validate base = Except.ok v",
+        "shipping.v1.Valid.Order.payer_Type.validate_complete": "∀ {base : shipping.v1.Order.payer_Type}, shipping.v1.Valid.Order.payer_Type.ValidPred base → (shipping.v1.Valid.Order.payer_Type.validate base).isOk",
+        "shipping.v1.Valid.Order.payer_Type.validate_sound": "∀ {base : shipping.v1.Order.payer_Type} {v : shipping.v1.Valid.Order.payer_Type}, shipping.v1.Valid.Order.payer_Type.validate base = Except.ok v → shipping.v1.Valid.Order.payer_Type.ValidPred base",
+        "shipping.v1.Valid.Order.validate_complete": "∀ {base : shipping.v1.Order}, shipping.v1.Valid.Order.ValidPred base → (shipping.v1.Valid.Order.validate base).isOk",
+        "shipping.v1.Valid.Order.validate_sound": "∀ {base : shipping.v1.Order} {v : shipping.v1.Valid.Order}, shipping.v1.Valid.Order.validate base = Except.ok v → shipping.v1.Valid.Order.ValidPred base",
+    },
     principal_theorems = [
         "shipping.v1.Valid.Order.validate_sound",
         "shipping.v1.Valid.Order.validate_complete",
@@ -62,6 +101,25 @@ lean_assurance_test(
 # map/repeated element rules, ignore-zero escapes, and a validated oneof sum.
 lean_assurance_test(
     name = "inventory_valid_assurance",
+    allowed_axioms = _ASSURANCE_ALLOWED_AXIOMS,
+    expected_extern_declarations = {},
+    expected_implemented_by = {},
+    expected_native_targets = _ASSURANCE_NATIVE_TARGETS,
+    expected_opaque_constants = [],
+    expected_partial_definitions = [],
+    expected_unsafe_constants = [],
+    module_prefixes = _ASSURANCE_MODULE_PREFIXES,
+    policy_mode = "exact",
+    principal_theorem_types = {
+        "catalog.v1.Valid.Payment.decodeValid_sound": "∀ {bytes : ByteArray} {v : catalog.v1.Valid.Payment}, catalog.v1.Valid.Payment.decodeValid bytes = Except.ok v → ∃ base, catalog.v1.Payment.decode bytes = Except.ok base ∧ catalog.v1.Valid.Payment.validate base = Except.ok v",
+        "catalog.v1.Valid.Payment.method_Type.validate_complete": "∀ {base : catalog.v1.Payment.method_Type}, catalog.v1.Valid.Payment.method_Type.ValidPred base → (catalog.v1.Valid.Payment.method_Type.validate base).isOk",
+        "catalog.v1.Valid.Payment.method_Type.validate_sound": "∀ {base : catalog.v1.Payment.method_Type} {v : catalog.v1.Valid.Payment.method_Type}, catalog.v1.Valid.Payment.method_Type.validate base = Except.ok v → catalog.v1.Valid.Payment.method_Type.ValidPred base",
+        "catalog.v1.Valid.Payment.validate_complete": "∀ {base : catalog.v1.Payment}, catalog.v1.Valid.Payment.ValidPred base → (catalog.v1.Valid.Payment.validate base).isOk",
+        "catalog.v1.Valid.Payment.validate_sound": "∀ {base : catalog.v1.Payment} {v : catalog.v1.Valid.Payment}, catalog.v1.Valid.Payment.validate base = Except.ok v → catalog.v1.Valid.Payment.ValidPred base",
+        "catalog.v1.Valid.Product.decodeValid_sound": "∀ {bytes : ByteArray} {v : catalog.v1.Valid.Product}, catalog.v1.Valid.Product.decodeValid bytes = Except.ok v → ∃ base, catalog.v1.Product.decode bytes = Except.ok base ∧ catalog.v1.Valid.Product.validate base = Except.ok v",
+        "catalog.v1.Valid.Product.validate_complete": "∀ {base : catalog.v1.Product}, catalog.v1.Valid.Product.ValidPred base → (catalog.v1.Valid.Product.validate base).isOk",
+        "catalog.v1.Valid.Product.validate_sound": "∀ {base : catalog.v1.Product} {v : catalog.v1.Valid.Product}, catalog.v1.Valid.Product.validate base = Except.ok v → catalog.v1.Valid.Product.ValidPred base",
+    },
     principal_theorems = [
         "catalog.v1.Valid.Product.validate_sound",
         "catalog.v1.Valid.Product.validate_complete",

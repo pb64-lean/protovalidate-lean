@@ -96,9 +96,12 @@ which downstream code can project and rewrite along without re-running any
 checks. `Test/PredSchemeTest.lean` keeps a hand-written mirror of the emission
 scheme compiling.
 
-Five `lean_assurance_test` targets audit axiom closures at compile time (no
-`sorryAx`, standard axioms only), covering both the instances and the scheme
-they instantiate. Every generated example in the repo is audited:
+Five exact-policy `lean_assurance_test` targets audit axiom closures at
+compile time (no `sorryAx`, standard axioms only), covering both the instances
+and the scheme they instantiate.  Each target also pins the definitional type
+of every principal theorem and the complete in-scope inventory of unsafe,
+partial, opaque, `@[implemented_by]`, `@[extern]`, and native dependencies.
+Additions *and removals* fail. Every generated example in the repo is audited:
 
 | target | principal theorems |
 |---|---|
@@ -334,8 +337,7 @@ proposition whose CEL evaluation would have errored:
   becomes key presence — at any path depth.
 - Warnings (stderr / JSON) flag translations with caveats: `has()` presence
   semantics beyond `Option` fields, evaluation-time-dependent `now`,
-  placeholder timestamp/duration types, free identifiers kept verbatim,
-  non-literal regex patterns.
+  placeholder timestamp/duration types, and free identifiers kept verbatim.
 - **`float` fields are compared at double precision**, as CEL does. A proto
   `float` is Lean `Float32`, but CEL converts it to a double before any numeric
   operation, so a typed `float` value is emitted as `x.toFloat` wherever it
@@ -464,13 +466,42 @@ is worth being exact about their reach.
   equivalence theorem and none is claimed; the Go side is not formalized.
 - `#guard` is *kernel evaluation of a closed Bool*, not a proof carried in any
   theorem's axiom closure. A generated `validate_sound` does not depend on it.
-- Nothing above applies to *dynamic* patterns (`this.matches(this.other)`):
-  they are unreachable at generation time, still fall back to matching nothing
-  when unsupported, and are flagged with a warning.
+- Dynamic patterns (`this.matches(this.other)`) are rejected by generation:
+  the generator cannot establish that their runtime value belongs to the
+  supported subset, and accepting them would be unsound under negation.
+- Hand-written callers with an untrusted pattern should use
+  `Cel.regexMatchChecked`, which reports parser failure separately;
+  `Cel.regexMatch` retains its generated-predicate `Bool` interface and maps an
+  invalid pattern to `false` only after the generator has established the
+  literal-pattern precondition.
 - The Go gate being stricter than the Lean parser is unchecked (and harmless:
   it only rejects patterns the engine could have handled). Only the other
   direction — Go accepts, Lean rejects — is unsound, and that is exactly what
   guard 2 catches.
+
+### Official conformance: the supported slice
+
+`//Conformance:supported_slice_test` runs the official protovalidate v1.2.2
+Go harness, fetched hermetically through Bazel, against a pure-Lean executor.
+The executor decodes the harness envelope, dispatches a closed registry of
+`Any.type_url` values to generated Lean decoders/validators, and emits the
+official violation structure.  The current executable slice is deliberately
+small: all six cases in `standard_rules/bool`, compared with both
+`--strict_error` and `--strict_message`; the expected-failure file is empty.
+The upstream bool vectors exercise exact result classification, violation
+count, field path, rule path, and rule ID. They do not supply expected
+violation-message text or compilation/runtime-error cases, so the two strict
+flags are enabled but cannot yet test those dimensions. This is a
+supported-slice gate, not a claim of whole-suite conformance.
+
+`//Conformance:registry_freshness_test` separately classifies every one of the
+32 `.proto` files in the pinned official case corpus. It fails if upstream's
+inventory changes, if the compiling source target is silently narrowed, or if
+a case lacks a status/reason. `bool.proto` and the generation-only
+`filename-with-dash.proto` currently compile. The observed blockers are kept
+explicit in `Conformance/corpus_registry.tsv`: single-constructor/oneof pattern
+generation, missing scalar wrapper WKTs, protobuf `Int32` versus CEL `Int`
+coercions, and fixed-width/float numeric literal and decidability gaps.
 
 ### Format assurance: what the battery does and does not say
 
@@ -543,6 +574,8 @@ Test/                 corpus TSV + genrule compiling every translation with
                       format_corpus.tsv holds protovalidate's conformance
                       expectations for the string formats (see format
                       assurance above).
+Conformance/          pinned official v1.2.2 supported-slice executor, corpus
+                      classification, expected-failure and freshness gates
 cmd/formatcorpus/     extracts that corpus from an upstream protovalidate
                       checkout, and renders it as the Lean #guard battery
 examples/shipping/    end-to-end pipeline example + runtime lean_test
@@ -563,9 +596,10 @@ non-generated, option-only proto dependencies such as
 
 ## Remaining work
 
-1. A conformance harness executing protovalidate's official test-suite data
-   against generated validators (current coverage: unit batteries mirroring
-   protovalidate library behavior plus the e2e examples).
+1. Expand the official conformance supported slice beyond
+   `standard_rules/bool`. The whole corpus is freshness-classified, but only
+   the admitted slice is an executable semantic claim; promotion requires
+   closing (not waiving) the generator/runtime blocker recorded for that file.
 2. Predefined (user-extension) rules; `(?i)` and `\b` in the regex engine;
    now-dependent rules (`timestamp.lt_now`/`within`), which need a
    validation-time story for `Cel.now`.
