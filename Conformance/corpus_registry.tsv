@@ -1,33 +1,33 @@
 file	status	coverage	reason
 bool.proto	supported	official standard_rules/bool suite	Generated base/refinement code compiles; the static executor dispatches every Bool message type.
-bytes.proto	deferred	none	Not yet admitted to the audited slice; bytes rule semantics and official cases require an explicit review.
-enums.proto	deferred	none	Not yet admitted to the audited slice; enum rule semantics and official cases require an explicit review.
+bytes.proto	deferred	none	The audited slice excludes bytes rule semantics and official cases because they lack an explicit review.
+enums.proto	deferred	none	The audited slice excludes enum rule semantics and official cases because they lack an explicit review.
 filename-with-dash.proto	supported	generation only	Generated base/refinement modules compile; this fixture tests stable module naming and has no validation suite.
-groups_editions.proto	deferred	none	Edition group code generation is outside the currently audited proto3 slice.
-groups_proto2.proto	deferred	none	Proto2 group code generation is outside the currently audited proto3 slice.
-ignore_empty_proto2.proto	deferred	none	Proto2 presence and ignore-empty semantics have not yet been audited.
+groups_editions.proto	deferred	none	The proto3 audited slice excludes Edition group code generation.
+groups_proto2.proto	deferred	none	The proto3 audited slice excludes Proto2 group code generation.
+ignore_empty_proto2.proto	deferred	none	No audit covers Proto2 presence and ignore-empty semantics.
 ignore_empty_proto3.proto	rejected	none	The base Lean generator emits a redundant wildcard branch for a single-constructor oneof, which Lean rejects.
-ignore_empty_proto_editions.proto	deferred	none	Edition presence and ignore-empty semantics have not yet been audited.
-ignore_proto2.proto	deferred	none	Proto2 presence and ignore semantics have not yet been audited.
+ignore_empty_proto_editions.proto	deferred	none	No audit covers Edition presence and ignore-empty semantics.
+ignore_proto2.proto	deferred	none	No audit covers Proto2 presence and ignore semantics.
 ignore_proto3.proto	rejected	none	The base Lean generator emits a redundant wildcard branch for a single-constructor oneof, which Lean rejects.
-ignore_proto_editions.proto	deferred	none	Edition presence and ignore semantics have not yet been audited.
-kitchen_sink.proto	deferred	none	Composite coverage is deferred until its individual rule families are admitted.
+ignore_proto_editions.proto	deferred	none	No audit covers Edition presence and ignore semantics.
+kitchen_sink.proto	deferred	none	Its component rule families are outside the audited slice, so the composite fixture has no coverage claim.
 library.proto	rejected	none	Generated CEL passes protobuf Int32 values to helpers whose exact Lean API accepts Int.
 maps.proto	deferred	none	Map key/value rule semantics and official cases require an explicit review.
 messages.proto	deferred	none	Nested message rule semantics and official cases require an explicit review.
 numbers.proto	rejected	none	Generated refinements require unavailable Float equality decisions and invalid scientific literals/coercions for fixed-width integers.
 oneofs.proto	rejected	none	Generated oneof eliminators contain patterns Lean reports as redundant or ill-formed.
-predefined_rules_proto2.proto	deferred	none	Proto2 predefined-rule compilation is outside the currently audited slice.
-predefined_rules_proto3.proto	deferred	none	Custom predefined-rule compilation and dispatch have not yet been audited.
-predefined_rules_proto_editions.proto	deferred	none	Edition predefined-rule compilation is outside the currently audited slice.
+predefined_rules_proto2.proto	deferred	none	The audited slice excludes Proto2 predefined-rule compilation.
+predefined_rules_proto3.proto	deferred	none	No audit covers custom predefined-rule compilation and dispatch.
+predefined_rules_proto_editions.proto	deferred	none	The audited slice excludes Edition predefined-rule compilation.
 repeated.proto	deferred	none	Repeated item and cardinality semantics and official cases require an explicit review.
-required_field_proto2.proto	deferred	none	Proto2 required-field semantics have not yet been audited.
-required_field_proto3.proto	deferred	none	Proto3 required-field semantics have not yet been audited.
-required_field_proto_editions.proto	deferred	none	Edition required-field semantics have not yet been audited.
+required_field_proto2.proto	deferred	none	No audit covers Proto2 required-field semantics.
+required_field_proto3.proto	deferred	none	No audit covers Proto3 required-field semantics.
+required_field_proto_editions.proto	deferred	none	No audit covers Edition required-field semantics.
 strings.proto	deferred	none	String rule semantics and official cases require an explicit review beyond the standalone runtime corpus.
 wkt_any.proto	deferred	none	Any support requires a generated/runtime google.protobuf.Any representation and static type registry.
 wkt_duration.proto	rejected	none	The protobuf runtime lacks wrapper WKT definitions such as google.protobuf.Int32Value required by this fixture.
-wkt_field_mask.proto	deferred	none	The protobuf runtime does not yet expose the FieldMask WKT used by this fixture.
-wkt_nested.proto	deferred	none	Nested WKT rules are deferred until all referenced WKT representations are available.
-wkt_timestamp.proto	deferred	none	Timestamp generation exists, but the official rule suite has not yet been admitted and audited.
-wkt_wrappers.proto	deferred	none	The protobuf runtime does not yet expose the scalar wrapper WKT definitions used by this fixture.
+wkt_field_mask.proto	deferred	none	The protobuf runtime lacks the FieldMask WKT used by this fixture.
+wkt_nested.proto	deferred	none	The protobuf runtime lacks WKT representations referenced by the nested rules.
+wkt_timestamp.proto	deferred	none	Timestamp generation is supported, but the official rule suite is outside the audited slice.
+wkt_wrappers.proto	deferred	none	The protobuf runtime lacks the scalar wrapper WKT definitions used by this fixture.

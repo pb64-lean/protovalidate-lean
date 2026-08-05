@@ -197,8 +197,8 @@ become Props over the (refined) sibling fields — the CEL ternary idiom
 
 ## cel2lean
 
-The CEL → Lean expression converter, the core of the future codegen, usable
-standalone:
+The CEL → Lean expression converter used by the code generator is also
+usable standalone:
 
 ```
 $ bazel run //cmd/cel2lean -- 'this.size() <= 100 && !this.contains("bad")'
@@ -213,9 +213,9 @@ expansion disabled, so `all`/`exists` arrive as calls and can be rendered as
 binders). That choice anchors the hardest part — CEL grammar, escapes,
 precedence, macro shapes — on the reference implementation; the translator
 itself is a compact syntax-directed mapping (`celtolean/`). Go is a
-codegen-time dependency only: nothing generated depends on Go at runtime, and
-the eventual protoc plugin (which must read `buf.validate` descriptor
-extensions) has first-class library support in Go.
+codegen-time dependency only: nothing generated depends on Go at runtime. The
+protoc plugin reads the `buf.validate` descriptor extensions through Go's
+first-class protobuf library support.
 
 ### Pure CEL in, no FieldDescriptor
 
@@ -231,7 +231,7 @@ type:
   error in the generated code — deliberately deferred to the compiler.
 
 Consequently the tool never generates the full subtype `def`; the codegen
-layer will assemble `{ x : T // <emitted proposition> }` itself.
+layer assembles `{ x : T // <emitted proposition> }` itself.
 
 ### Mapping
 
@@ -286,12 +286,12 @@ proposition whose CEL evaluation would have errored:
   width** first — an `int32` field's `this * 100` emits `x.toInt64 * 100`
   under `Cel.mulOk x.toInt64 100` — so the guard is exactly CEL's condition
   and an intermediate outside the 32-bit range is not an overflow, matching
-  CEL. Division and modulo widen too (fixing `int32Min / -1`, which wraps in
-  `Int32` but not in CEL). Comprehension binders and indexed elements are typed
-  too (see below), so this reaches inside `all`/`exists` bodies; only values
-  with no proto type at all (free identifiers) fall back to the operand's own
-  Lean type, where `Int32`/`UInt32` operands demand the 32-bit range —
-  conservatively stricter than CEL, sound but not exact.
+  CEL. Division and modulo widen too, so `int32Min / -1` follows CEL semantics
+  instead of wrapping as `Int32`. Comprehension binders and indexed elements
+  are typed too (see below), so this reaches inside `all`/`exists` bodies;
+  only values with no proto type at all (free identifiers) fall back to the
+  operand's own Lean type, where `Int32`/`UInt32` operands demand the 32-bit
+  range — conservatively stricter than CEL, sound but not exact.
   `Nat` size arithmetic guards truncating subtraction. Constant arithmetic
   folds and range-checks at generation time (an always-erroring rule is
   rejected); concatenation and timestamp/duration arithmetic are total and
@@ -314,8 +314,8 @@ proposition whose CEL evaluation would have errored:
   elements, a map's keys) and the value indexing yields (`this.items[0]` — an
   element, a map's value) carry the same descriptor typing a named field does.
   Paths compose through binders, so `this.all(o, o.lots.all(n, n > 3e9))` is
-  range-checked at the innermost element's type. This closes the last
-  silent-wrap corner: only free identifiers now go untyped.
+  range-checked at the innermost element's type. Only free identifiers lack
+  descriptor typing.
 - **Indexing**: CEL errors on an out-of-range index or missing map key, so
   `l[i]` / `m['k']` translate to `(l[i]?).get h` under a pending
   `(l[i]?).isSome` guard rather than a panicking `l[i]!`. Guards discharge at
@@ -349,9 +349,9 @@ proposition whose CEL evaluation would have errored:
   proposition whose CEL evaluation is false. Standard `float.*` rules are left
   narrow deliberately: their bounds come from the descriptor and are already
   exactly `Float32` values, so the comparison cannot round either way. A
-  `float`/`double` field comparison now elaborates too (the `float` side
-  widens). What remains: `string(e)` uses `toString`, whose formatting may
-  diverge from CEL's for floats.
+  `float`/`double` field comparison elaborates by widening the `float` side.
+  `string(e)` uses `toString`, whose formatting may diverge from CEL's for
+  floats.
 
 ## Codegen semantics and limitations
 
@@ -392,7 +392,7 @@ proposition whose CEL evaluation would have errored:
   member type's validated variant. `(buf.validate.oneof).required` unwraps
   the `Option` (validate reports `required` on an unset oneof). `required` on
   an individual member is ignored with a note (the active case already
-  implies presence). Unconstrained oneofs still ride along as the base sum.
+  implies presence). Unconstrained oneofs use the base sum.
   Every real oneof additionally gets per-member `<member>_or_default`
   accessors (on the validated sum, or extending the base sum's namespace for
   unconstrained oneofs), shaped to the field: bare-sum dot form for required
@@ -414,8 +414,8 @@ proposition whose CEL evaluation would have errored:
   not decidable — use `==`/ordering in rules). Standard rules
   `timestamp.const/lt/lte/gt/gte` and
   `duration.const/lt/lte/gt/gte/in/not_in` lower like the numeric families;
-  `lt_now`/`gt_now`/`within` are rejected (`Cel.now` is opaque — keep
-  evaluation-time constraints outside the refinement).
+  `lt_now`/`gt_now`/`within` are rejected because `Cel.now` is opaque;
+  evaluation-time constraints are outside the refinement.
 - The regex engine rejects unsupported RE2 constructs (`(?i)` flags, `\b`,
   named classes) at parse time — such patterns would match nothing at
   runtime, which would be unsound under negation. See
@@ -485,14 +485,14 @@ is worth being exact about their reach.
 Go harness, fetched hermetically through Bazel, against a pure-Lean executor.
 The executor decodes the harness envelope, dispatches a closed registry of
 `Any.type_url` values to generated Lean decoders/validators, and emits the
-official violation structure.  The current executable slice is deliberately
-small: all six cases in `standard_rules/bool`, compared with both
+official violation structure. The executable supported slice consists of all
+six cases in `standard_rules/bool`, compared with both
 `--strict_error` and `--strict_message`; the expected-failure file is empty.
 The upstream bool vectors exercise exact result classification, violation
 count, field path, rule path, and rule ID. They do not supply expected
 violation-message text or compilation/runtime-error cases, so the two strict
-flags are enabled but cannot yet test those dimensions. This is a
-supported-slice gate, not a claim of whole-suite conformance. Because the
+flags do not test those dimensions. This is a supported-slice gate, not a
+claim of whole-suite conformance. Because the
 upstream runner exits 0 when a suite filter matches nothing, the gate also
 asserts the harness summary reports exactly six executed, passing cases; a
 corpus bump that renames or empties the suite fails instead of passing
@@ -501,11 +501,12 @@ vacuously.
 `//Conformance:registry_freshness_test` separately classifies every one of the
 32 `.proto` files in the pinned official case corpus. It fails if upstream's
 inventory changes, if the compiling source target is silently narrowed, or if
-a case lacks a status/reason. `bool.proto` and the generation-only
-`filename-with-dash.proto` currently compile. The observed blockers are kept
-explicit in `Conformance/corpus_registry.tsv`: single-constructor/oneof pattern
-generation, missing scalar wrapper WKTs, protobuf `Int32` versus CEL `Int`
-coercions, and fixed-width/float numeric literal and decidability gaps.
+a case lacks a status/reason. The compiling set consists of `bool.proto` and
+the generation-only `filename-with-dash.proto`.
+`Conformance/corpus_registry.tsv` records the blockers for every other file:
+single-constructor/oneof pattern generation, missing scalar wrapper WKTs,
+protobuf `Int32` versus CEL `Int` coercions, and fixed-width/float numeric
+literal and decidability gaps.
 
 ### Format assurance: what the battery does and does not say
 
@@ -529,13 +530,6 @@ emits* (`x.isIpPrefix 4 true`, the `isHostname || isIp` disjunction
 `string.address` lowers to, the `Cel.regexMatch` calls `string.uuid` /
 `string.tuuid` lower to), so a wrapper-level slip is caught too.
 
-Standing this up found 19 disagreements, all of them bugs on this side — the
-RFC 5322 dot-atom reading of `isEmail` (protovalidate uses the HTML living
-standard's definition), a rejected DNS-root trailing dot, missing RFC 4007
-zone identifiers, first- rather than last-separator splitting in
-`isHostAndPort`, and missing IPvFuture / RFC 6874 zones / percent-encoded-UTF-8
-checking in URI hosts. All are fixed; the corpus is what keeps them fixed.
-
 **Not enforced — do not read more into the battery than this.**
 
 - It is **differential testing against a finite corpus**, not a proof that
@@ -544,8 +538,8 @@ checking in URI hosts. All are fixed; the corpus is what keeps them fixed.
   theorem and none is claimed.
 - `#guard` is kernel evaluation of a closed `Bool`, not a proof carried in any
   theorem's axiom closure — a generated `validate_sound` does not depend on it.
-- The corpus is a **vendored snapshot**. It is only as current as the last
-  `-extract` run; nothing in the build detects that upstream added cases.
+- The corpus is a **vendored snapshot** of one `-extract` run; the build does
+  not detect additions to the upstream corpus.
 - Formats protovalidate has that this repo does not lower at all (`ulid`,
   `well_known_regex`) are rejected at generation time, so they have no
   corpus rows.
@@ -558,8 +552,8 @@ load-bearing one is `ipv4Value?_lt`: the value an accepted IPv4 address denotes
 really is below `2 ^ 32`, which is exactly what `isIpPrefix`'s host-bit masking
 (`v % 2 ^ (32 - len)`) assumes. The others pin documented shape claims
 (`ipv4Value?_length`, `isHostname_length`, `isPort_le`, `isIp_version` — only
-versions 0/4/6 are ever accepted). The URI, email and IPv6 grammars carry no
-such laws; they rest on the corpus alone.
+versions 0/4/6 are ever accepted). The URI, email and IPv6 grammars have no
+corresponding recognizer laws; their evidence is the corpus alone.
 
 ## Layout
 
@@ -593,35 +587,29 @@ package on case-insensitive filesystems.)
 bazel test //...     # Go golden tests, corpus compile test, e2e runtime test
 ```
 
-Note: grpc-lean's `protoc-gen-lean4` needed a small fix (imports emitted for
-non-generated, option-only proto dependencies such as
-`buf/validate/validate.proto`); it lives in grpc-lean commit
-"protoc-gen-lean4: only import modules for generated dependencies".
+## Unsupported scope and limits
 
-## Remaining work
-
-1. Expand the official conformance supported slice beyond
-   `standard_rules/bool`. The whole corpus is freshness-classified, but only
-   the admitted slice is an executable semantic claim; promotion requires
-   closing (not waiving) the generator/runtime blocker recorded for that file.
-2. Predefined (user-extension) rules; `(?i)` and `\b` in the regex engine;
-   now-dependent rules (`timestamp.lt_now`/`within`), which need a
-   validation-time story for `Cel.now`.
-3. Residual conservative spots (sound, but stricter than CEL or late-failing).
-   Descriptor-aware numerics — now reaching comprehension binders and indexed
-   elements — closed the literal-wrapping hole and made arithmetic guards
-   CEL-exact wherever a rule's value resolves to a proto type. What is left:
-   - free identifiers carry no descriptor type, so their literals are
-     unchecked and their 32-bit guards stay conservative;
-   - error absorption under negation (`!(err && false)`) translates to
-     failure;
-   - index proofs inside `exists_one`/`map`/`filter` bodies and negated
-     quantifier bodies have no sound discharge point and are rejected.
-4. No formal relation between `Protovalidate.Cel.Regex` and RE2 beyond the
-   per-pattern differential batteries (see
-   [regex assurance](#regex-assurance-what-the-guards-do-and-do-not-say)), nor
-   between `Cel.Format`'s grammars and their RFCs beyond the conformance
-   battery and the IPv4/hostname/port recognizer laws (see
-   [format assurance](#format-assurance-what-the-battery-does-and-does-not-say)).
-   Both corpora are vendored snapshots of upstream references; the URI, email
-   and IPv6 grammars carry no laws yet.
+- The executable official-conformance claim covers
+  `standard_rules/bool`. The complete corpus is freshness-classified, and
+  each case outside the supported slice has a generator or runtime blocker
+  recorded in `Conformance/corpus_registry.tsv`.
+- Predefined user-extension rules, the `(?i)` and `\b` regex constructs, and
+  evaluation-time-dependent rules such as `timestamp.lt_now` and `within`
+  are unsupported. `Cel.now` has no validation-time interpretation in a
+  refinement.
+- Some translations are sound but conservative or rejected at generation
+  time:
+  - free identifiers carry no descriptor type, so their literals are
+    unchecked and their 32-bit guards use the operand's Lean domain;
+  - error absorption under negation (`!(err && false)`) translates to
+    failure;
+  - index proofs inside `exists_one`/`map`/`filter` bodies and negated
+    quantifier bodies have no sound discharge point and are rejected.
+- No formal relation connects `Protovalidate.Cel.Regex` to RE2 beyond the
+  per-pattern differential batteries (see
+  [regex assurance](#regex-assurance-what-the-guards-do-and-do-not-say)). No
+  formal relation connects `Cel.Format`'s grammars to their RFCs beyond the
+  conformance battery and the IPv4/hostname/port recognizer laws (see
+  [format assurance](#format-assurance-what-the-battery-does-and-does-not-say)).
+  Both corpora are vendored snapshots of upstream references; the URI, email,
+  and IPv6 grammars have no corresponding recognizer laws.
