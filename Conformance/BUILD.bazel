@@ -33,7 +33,10 @@ lean_binary(
 # v1.2.2 harness and all six cases in standard_rules/bool, with the strict error
 # and message flags enabled, but makes no whole-corpus conformance claim.  These
 # particular upstream vectors contain neither expected message text nor error
-# cases; they do exactly compare violation structure, paths, and rule ids.
+# cases; they do exactly compare violation structure, paths, and rule ids.  The
+# script also asserts the harness summary shows exactly six executed, passing
+# cases: the upstream runner exits 0 on an empty suite filter, so the exit code
+# alone would let a renamed suite pass vacuously.
 sh_test(
     name = "supported_slice_test",
     srcs = ["supported_slice_test.sh"],

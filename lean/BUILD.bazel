@@ -92,6 +92,12 @@ lean_assurance_test(
         # array (structural rules stated over the former).
         "Protovalidate.size_mapArray",
     ],
+    # The protobuf runtime the Cel shims import (well-known types and their
+    # codec substrate). Audited at its source, grpc_lean_protobuf.
+    unaudited_module_prefixes = [
+        "Binary",
+        "Protobuf",
+    ],
     deps = [
         ":protovalidate_cel",
         ":protovalidate_runtime",
@@ -134,5 +140,7 @@ lean_assurance_test(
         "Cel.Format.isPort_le",
         "Cel.Format.isIp_version",
     ],
+    # The recognizers under proof; :runtime_assurance audits them.
+    unaudited_module_prefixes = ["Protovalidate.Cel.Format"],
     deps = [":protovalidate_format_laws"],
 )

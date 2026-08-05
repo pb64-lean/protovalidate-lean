@@ -492,7 +492,11 @@ The upstream bool vectors exercise exact result classification, violation
 count, field path, rule path, and rule ID. They do not supply expected
 violation-message text or compilation/runtime-error cases, so the two strict
 flags are enabled but cannot yet test those dimensions. This is a
-supported-slice gate, not a claim of whole-suite conformance.
+supported-slice gate, not a claim of whole-suite conformance. Because the
+upstream runner exits 0 when a suite filter matches nothing, the gate also
+asserts the harness summary reports exactly six executed, passing cases; a
+corpus bump that renames or empties the suite fails instead of passing
+vacuously.
 
 `//Conformance:registry_freshness_test` separately classifies every one of the
 32 `.proto` files in the pinned official case corpus. It fails if upstream's

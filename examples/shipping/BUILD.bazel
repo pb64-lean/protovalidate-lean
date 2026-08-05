@@ -22,6 +22,27 @@ _ASSURANCE_MODULE_PREFIXES = [
     "ShippingValid.shipping",
 ]
 
+# The substrate the generated theorems are stated over: the base decoder
+# modules, the cross-target Money embed (audited by
+# //examples/common:money_valid_assurance), the protovalidate runtime/Cel
+# shims (audited by //lean:runtime_assurance), and the grpc-lean
+# proto/gRPC/TLS runtime the generated code imports (audited at its sources:
+# grpc-lean and tls13-lean). The theorems' axiom closures still traverse all
+# of it.
+_ASSURANCE_UNAUDITED_MODULE_PREFIXES = [
+    "Binary",
+    "Grpc",
+    "HaclStar",
+    "MoneyLean",
+    "MoneyValid",
+    "Protobuf",
+    "Protovalidate",
+    "ShippingLean",
+    "TLS13",
+    "Tls",
+    "Zlib",
+]
+
 _ASSURANCE_NATIVE_TARGETS = [
     "@rules_lean_grpc+//Zlib:lean_runtime_headers",
     "@rules_lean_grpc+//Zlib:zlib_shim",
@@ -94,6 +115,7 @@ lean_assurance_test(
         "shipping.v1.Valid.Order.payer_Type.validate_sound",
         "shipping.v1.Valid.Order.payer_Type.validate_complete",
     ],
+    unaudited_module_prefixes = _ASSURANCE_UNAUDITED_MODULE_PREFIXES,
     deps = [":shipping_valid"],
 )
 
@@ -130,6 +152,7 @@ lean_assurance_test(
         "catalog.v1.Valid.Payment.method_Type.validate_sound",
         "catalog.v1.Valid.Payment.method_Type.validate_complete",
     ],
+    unaudited_module_prefixes = _ASSURANCE_UNAUDITED_MODULE_PREFIXES,
     deps = [":shipping_valid"],
 )
 

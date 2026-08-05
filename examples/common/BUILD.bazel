@@ -61,5 +61,21 @@ lean_assurance_test(
         "common.v1.Valid.Money.validate_complete",
         "common.v1.Valid.Money.decodeValid_sound",
     ],
+    # The substrate the generated theorems are stated over: the base decoder
+    # module, the protovalidate runtime/Cel shims (audited by
+    # //lean:runtime_assurance), and the grpc-lean proto/gRPC/TLS runtime the
+    # generated code imports (audited at its sources: grpc-lean and
+    # tls13-lean). The theorems' axiom closures still traverse all of it.
+    unaudited_module_prefixes = [
+        "Binary",
+        "Grpc",
+        "HaclStar",
+        "MoneyLean",
+        "Protobuf",
+        "Protovalidate",
+        "TLS13",
+        "Tls",
+        "Zlib",
+    ],
     deps = [":money_valid"],
 )
